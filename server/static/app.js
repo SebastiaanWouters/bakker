@@ -136,72 +136,59 @@ function isSimpleNumber(field) {
   return /^\d+$/.test(field);
 }
 
-function cronToHuman(expr) {
-  const fields = expr.trim().split(/\s+/);
-  if (fields.length !== 5) return null;
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
 
-  const [min, hour, dom, month, dow] = fields;
-  const parts = [];
+function describeTime(min, hour) {
+  if (min === "*" && hour === "*") return "Every minute";
 
-  if (min.startsWith("*/") && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+  if (min.startsWith("*/") && hour === "*") {
     const n = parseInt(min.slice(2), 10);
     return n === 1 ? "Every minute" : `Every ${n} minutes`;
   }
 
-  if (isSimpleNumber(min) && hour !== "*") {
-    const m = parseInt(min, 10);
-    const hourVals = expandField(hour, 0, 23);
-    if (hourVals && hourVals.length > 0) {
-      const times = hourVals.map((h) => formatTime24(h, m));
-      if (times.length <= 6) {
-        parts.push(`At ${times.join(", ")}`);
-      } else {
-        parts.push(`At :${String(m).padStart(2, "0")} every ${parseInt(hour.split("/")[1], 10)} hours`);
-      }
-    }
-  } else if (min.startsWith("*/")) {
-    const n = parseInt(min.slice(2), 10);
-    const minDesc = n === 1 ? "every minute" : `every ${n} minutes`;
-    if (hour !== "*") {
-      const hourVals = expandField(hour, 0, 23);
-      if (hourVals) {
-        if (hourVals.length <= 6) {
-          parts.push(`${minDesc} during ${hourVals.map((h) => formatTime24(h)).join(", ")}`);
-        } else {
-          parts.push(`${minDesc} every ${parseInt(hour.split("/")[1], 10)} hours`);
-        }
-      }
-    } else {
-      parts.push(minDesc.charAt(0).toUpperCase() + minDesc.slice(1));
-    }
-  } else if (min === "*") {
-    if (hour !== "*") {
-      const hourVals = expandField(hour, 0, 23);
-      if (hourVals && hourVals.length <= 6) {
-        parts.push(`Every minute during ${hourVals.map((h) => formatTime24(h)).join(", ")}`);
-      } else {
-        parts.push(`Every minute during hours ${hour}`);
-      }
-    }
-  } else {
-    const minVals = expandField(min, 0, 59);
-    if (minVals && hour !== "*") {
-      const hourVals = expandField(hour, 0, 23);
-      if (hourVals) {
-        const times = [];
-        for (const h of hourVals) {
-          for (const m of minVals) {
-            times.push(formatTime24(h, m));
-          }
-        }
-        if (times.length <= 8) {
-          parts.push(`At ${times.join(", ")}`);
-        } else {
-          parts.push(`At minutes ${min} during hours ${hour}`);
-        }
-      }
-    }
+  if (isSimpleNumber(min) && hour === "*") {
+    return `At :${pad2(parseInt(min, 10))} every hour`;
   }
+
+  if (isSimpleNumber(min) && isSimpleNumber(hour)) {
+    return `At ${pad2(parseInt(hour, 10))}:${pad2(parseInt(min, 10))}`;
+  }
+
+  if (isSimpleNumber(min) && hour.startsWith("*/")) {
+    const n = parseInt(hour.slice(2), 10);
+    return `At :${pad2(parseInt(min, 10))} every ${n} hours`;
+  }
+
+  if (min === "0" && hour.startsWith("*/")) {
+    const n = parseInt(hour.slice(2), 10);
+    return n === 1 ? "Every hour" : `Every ${n} hours`;
+  }
+
+  if (min === "*" && hour !== "*") {
+    const hourVals = expandField(hour, 0, 23);
+    if (hourVals && hourVals.length <= 6) {
+      return `Every minute during ${hourVals.map((h) => formatTime24(h)).join(", ")}`;
+    }
+    return `Every minute during hours ${hour}`;
+  }
+
+  if (hour === "*" && min !== "*") {
+    return `At minutes ${min} every hour`;
+  }
+
+  return `Cron ${hour}:${min}`;
+}
+
+function cronToHuman(expr) {
+  const trimmed = expr.trim();
+  const fields = trimmed.split(/\s+/);
+  if (fields.length !== 5) return null;
+  if (validateCron(trimmed)) return null;
+
+  const [min, hour, dom, month, dow] = fields;
+  const parts = [describeTime(min, hour)];
 
   if (dow !== "*") {
     const dowDesc = describeDow(dow);
@@ -218,11 +205,6 @@ function cronToHuman(expr) {
     if (monthDesc) parts.push(`in ${monthDesc}`);
   }
 
-  if (parts.length > 0 && dom === "*" && dow === "*" && month === "*" && !parts[0].toLowerCase().includes("every")) {
-    parts.push("daily");
-  }
-
-  if (parts.length === 0) return null;
   return parts.join(" ");
 }
 
@@ -277,6 +259,71 @@ function restoreToken() {
     const el = document.getElementById("auth-token");
     if (el) el.value = saved;
   }
+}
+
+// --- Password Management ---
+
+let passwordConfigs = [];
+
+function togglePasswordVisibility() {
+  const input = document.getElementById("db-form-password");
+  const toggleText = document.getElementById("password-toggle-text");
+  
+  if (input.type === "password") {
+    input.type = "text";
+    toggleText.textContent = "Hide";
+  } else {
+    input.type = "password";
+    toggleText.textContent = "Show";
+  }
+}
+
+async function savePassword(configName, password) {
+  if (!password) return;
+  try {
+    await api(`/api/passwords/${encodeURIComponent(configName)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+  } catch (err) {
+    console.error("Failed to save password:", err);
+    throw err;
+  }
+}
+
+async function deletePassword(configName) {
+  try {
+    await api(`/api/passwords/${encodeURIComponent(configName)}`, {
+      method: "DELETE",
+    });
+  } catch (err) {
+    console.error("Failed to delete password:", err);
+  }
+}
+
+async function loadPasswordStatus() {
+  try {
+    const status = await api("/api/passwords");
+    passwordConfigs = status.configs || [];
+    
+    if (status.decryptionFailed) {
+      document.getElementById("password-warning").hidden = false;
+    }
+    
+    return passwordConfigs;
+  } catch (err) {
+    console.error("Failed to load password status:", err);
+    return [];
+  }
+}
+
+function hasPassword(configName) {
+  return passwordConfigs.includes(configName);
+}
+
+function hidePasswordWarning() {
+  document.getElementById("password-warning").hidden = true;
 }
 
 // --- API helpers ---
@@ -337,11 +384,9 @@ async function loadBackups() {
       for (const b of backups[db]) {
         html += `<tr>
           <td>${b.date}</td>
-          <td>${b.sizeMB} MB</td>
+          <td>${b.sizeHuman || `${b.sizeMB} MB`}</td>
           <td class="backup-actions">
-            <a href="/api/backups/${encodeURIComponent(b.filename)}" download>
-              <button class="small secondary">Download</button>
-            </a>
+            <button class="small secondary" data-download-file="${encodeURIComponent(b.filename)}">Download</button>
             <button class="small danger" data-delete-file="${encodeURIComponent(b.filename)}">Delete</button>
           </td>
         </tr>`;
@@ -349,6 +394,11 @@ async function loadBackups() {
       html += "</tbody></table></div>";
     }
     container.innerHTML = html;
+    container.querySelectorAll("[data-download-file]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        downloadBackup(decodeURIComponent(btn.dataset.downloadFile));
+      });
+    });
     container.querySelectorAll("[data-delete-file]").forEach((btn) => {
       btn.addEventListener("click", () => {
         deleteBackup(decodeURIComponent(btn.dataset.deleteFile));
@@ -356,6 +406,37 @@ async function loadBackups() {
     });
   } catch (err) {
     container.innerHTML = `<p class="no-backups">Could not load backups: ${err.message}</p>`;
+  }
+}
+
+async function downloadBackup(filename) {
+  try {
+    const token = getAuthToken();
+    const res = await fetch(`/api/backups/${encodeURIComponent(filename)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let msg = `Download failed (${res.status})`;
+      try {
+        const data = await res.json();
+        if (data?.error) msg = data.error;
+      } catch {
+        // ignore
+      }
+      throw new Error(msg);
+    }
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast(err.message, "error");
   }
 }
 
@@ -431,7 +512,10 @@ function renderDbCards() {
 
   let html = "";
   for (const [name, cfg] of dbs) {
-    const envVar = `DB_PASS_${name.toUpperCase()}`;
+    const hasPass = hasPassword(name);
+    const passStatus = hasPass 
+      ? '<span class="password-status locked">Password set</span>'
+      : '<span class="password-status unlocked">No password</span>';
     html += `<div class="db-card">
       <div class="db-card-header">
         <strong>${name}</strong>
@@ -442,7 +526,7 @@ function renderDbCards() {
       </div>
       <div class="db-card-body">
         <span class="conn-str">${cfg.db_user}@${cfg.db_host}:${cfg.db_port}/${cfg.db_name}</span>
-        <span class="env-hint">Expects ${envVar}</span>
+        ${passStatus}
       </div>
     </div>`;
   }
@@ -457,8 +541,12 @@ function showAddDbForm() {
   document.getElementById("db-form-port").value = "3306";
   document.getElementById("db-form-dbname").value = "";
   document.getElementById("db-form-user").value = "";
+  document.getElementById("db-form-password").value = "";
   document.getElementById("db-form-ignored").value = "";
   document.getElementById("db-form-structure").value = "";
+  // Reset password visibility toggle
+  document.getElementById("db-form-password").type = "password";
+  document.getElementById("password-toggle-text").textContent = "Show";
   document.getElementById("db-form-container").hidden = false;
 }
 
@@ -476,6 +564,10 @@ function editDatabase(name) {
   document.getElementById("db-form-port").value = cfg.db_port || "3306";
   document.getElementById("db-form-dbname").value = cfg.db_name || "";
   document.getElementById("db-form-user").value = cfg.db_user || "";
+  // Clear password field - user must re-enter when editing
+  document.getElementById("db-form-password").value = "";
+  document.getElementById("db-form-password").type = "password";
+  document.getElementById("password-toggle-text").textContent = "Show";
   document.getElementById("db-form-ignored").value = (cfg.ignored_tables || []).join("\n");
   document.getElementById("db-form-structure").value = (cfg.structure_only_tables || []).join("\n");
   document.getElementById("db-form-container").hidden = false;
@@ -514,6 +606,8 @@ async function saveDatabase(event) {
     structure_only_tables: parseTextareaList("db-form-structure"),
   };
 
+  const password = document.getElementById("db-form-password").value;
+
   const config = { ...currentConfig };
   config.databases = { ...config.databases };
 
@@ -532,6 +626,16 @@ async function saveDatabase(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
     });
+    
+    // Save password if provided
+    if (password) {
+      await savePassword(name, password);
+      // Update password status
+      if (!passwordConfigs.includes(name)) {
+        passwordConfigs.push(name);
+      }
+    }
+    
     currentConfig = config;
     renderDbCards();
     populateTriggerSelect();
@@ -558,6 +662,12 @@ async function deleteDatabase(name) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
     });
+    
+    // Delete password as well
+    await deletePassword(name);
+    // Remove from password status
+    passwordConfigs = passwordConfigs.filter((p) => p !== name);
+    
     currentConfig = config;
     renderDbCards();
     populateTriggerSelect();
@@ -601,6 +711,189 @@ function hideTemplatesModal() {
   document.getElementById("templates-modal").hidden = true;
 }
 
+let currentPreviewTemplate = null;
+let currentPreviewTemplateName = null;
+
+function showSaveTemplateModal() {
+  const name = document.getElementById("db-form-name").value.trim();
+  const host = document.getElementById("db-form-host").value.trim();
+  
+  if (!name || !host) {
+    showToast("Please fill in at least the config name and host first", "error");
+    return;
+  }
+  
+  document.getElementById("template-name").value = name;
+  document.getElementById("save-template-modal").hidden = false;
+}
+
+function hideSaveTemplateModal() {
+  document.getElementById("save-template-modal").hidden = true;
+  document.getElementById("template-name").value = "";
+}
+
+async function saveAsTemplate() {
+  const templateName = document.getElementById("template-name").value.trim();
+  
+  if (!templateName) {
+    showToast("Template name is required", "error");
+    return;
+  }
+  
+  if (!/^[a-zA-Z0-9_]+$/.test(templateName)) {
+    showToast("Template name: only letters, numbers, and underscores allowed", "error");
+    return;
+  }
+  
+  const dbConfig = {
+    db_host: document.getElementById("db-form-host").value.trim(),
+    db_port: document.getElementById("db-form-port").value.trim() || "3306",
+    db_name: document.getElementById("db-form-dbname").value.trim(),
+    db_user: document.getElementById("db-form-user").value.trim(),
+    ignored_tables: parseTextareaList("db-form-ignored"),
+    structure_only_tables: parseTextareaList("db-form-structure"),
+  };
+  
+  const includeSchedule = document.getElementById("template-include-schedule").checked;
+  const schedules = includeSchedule 
+    ? [{ database: document.getElementById("db-form-name").value.trim(), cron: "0 */6 * * *" }]
+    : [];
+  
+  const template = {
+    databases: { [document.getElementById("db-form-name").value.trim()]: dbConfig },
+    schedules: schedules,
+  };
+  
+  try {
+    await api("/api/templates", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: templateName, template }),
+    });
+    hideSaveTemplateModal();
+    showToast(`Template "${templateName}" saved`);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function showTemplatesModal() {
+  const modal = document.getElementById("templates-modal");
+  const list = document.getElementById("templates-list");
+
+  try {
+    const templates = await api("/api/templates");
+    const names = Object.keys(templates);
+
+    if (names.length === 0) {
+      list.innerHTML = `
+        <p class="empty-state">No templates available yet.</p>
+        <p class="text-muted">Save a database configuration as a template to reuse it later.</p>
+      `;
+    } else {
+      list.innerHTML = names.map((name) => {
+        const t = templates[name];
+        const dbNames = Object.keys(t.databases);
+        const dbCount = dbNames.length;
+        const scheduleCount = t.schedules?.length || 0;
+        
+        return `<div class="template-card">
+          <div class="template-card-header">
+            <strong>${name}</strong>
+            <div class="template-card-actions">
+              <button class="small" onclick="previewTemplate('${name}')">Preview</button>
+              <button class="small" onclick="applyTemplate('${name}')">Apply</button>
+              <button class="small danger" onclick="deleteTemplate('${name}')">Delete</button>
+            </div>
+          </div>
+          <div class="template-card-body">
+            ${dbCount} database${dbCount !== 1 ? 's' : ''}${scheduleCount > 0 ? `, ${scheduleCount} schedule${scheduleCount !== 1 ? 's' : ''}` : ''}
+            <div class="template-db-list">${dbNames.join(", ")}</div>
+          </div>
+        </div>`;
+      }).join("");
+    }
+  } catch (err) {
+    list.innerHTML = `<p class="empty-state">Could not load templates: ${err.message}</p>`;
+  }
+
+  modal.hidden = false;
+}
+
+function hideTemplatesModal() {
+  document.getElementById("templates-modal").hidden = true;
+}
+
+async function previewTemplate(name) {
+  try {
+    const templates = await api("/api/templates");
+    const template = templates[name];
+    if (!template) {
+      showToast("Template not found", "error");
+      return;
+    }
+    
+    currentPreviewTemplate = template;
+    currentPreviewTemplateName = name;
+    
+    const content = document.getElementById("template-preview-content");
+    
+    let dbHtml = '';
+    for (const [dbName, dbCfg] of Object.entries(template.databases)) {
+      const ignored = dbCfg.ignored_tables?.length > 0 ? dbCfg.ignored_tables.join(", ") : "none";
+      const structureOnly = dbCfg.structure_only_tables?.length > 0 ? dbCfg.structure_only_tables.join(", ") : "none";
+      
+      dbHtml += `<div class="template-preview-db">
+        <div class="db-name">${dbName}</div>
+        <div class="db-details">${dbCfg.db_user}@${dbCfg.db_host}:${dbCfg.db_port}/${dbCfg.db_name}</div>
+        <div class="db-details">Ignored tables: ${ignored}</div>
+        <div class="db-details">Structure-only: ${structureOnly}</div>
+      </div>`;
+    }
+    
+    let scheduleHtml = '';
+    if (template.schedules && template.schedules.length > 0) {
+      scheduleHtml = template.schedules.map(s => {
+        const human = cronToHuman(s.cron) || s.cron;
+        return `<div class="template-preview-schedule">
+          <code>${s.cron}</code>
+          <span class="text-muted">${human}</span>
+          <span>for ${s.database}</span>
+        </div>`;
+      }).join("");
+    } else {
+      scheduleHtml = '<p class="text-muted">No schedules included</p>';
+    }
+    
+    content.innerHTML = `
+      <div class="template-preview-section">
+        <h4>Databases (${Object.keys(template.databases).length})</h4>
+        ${dbHtml}
+      </div>
+      <div class="template-preview-section">
+        <h4>Schedules (${template.schedules?.length || 0})</h4>
+        ${scheduleHtml}
+      </div>
+    `;
+    
+    document.getElementById("template-preview-modal").hidden = false;
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function hideTemplatePreviewModal() {
+  document.getElementById("template-preview-modal").hidden = true;
+  currentPreviewTemplate = null;
+  currentPreviewTemplateName = null;
+}
+
+async function applyPreviewedTemplate() {
+  if (!currentPreviewTemplate || !currentPreviewTemplateName) return;
+  await applyTemplate(currentPreviewTemplateName);
+  hideTemplatePreviewModal();
+}
+
 async function applyTemplate(name) {
   try {
     const templates = await api("/api/templates");
@@ -632,6 +925,18 @@ async function applyTemplate(name) {
     renderSchedules();
     hideTemplatesModal();
     showToast(`Applied "${name}"`);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function deleteTemplate(name) {
+  if (!confirm(`Delete template "${name}"?`)) return;
+  
+  try {
+    await api(`/api/templates/${encodeURIComponent(name)}`, { method: "DELETE" });
+    showToast(`Template "${name}" deleted`);
+    showTemplatesModal();
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -758,6 +1063,7 @@ async function loadConfig() {
   try {
     currentConfig = await api("/api/config");
     document.getElementById("retention").value = currentConfig.retention || 5;
+    await loadPasswordStatus();
     renderDbCards();
     populateTriggerSelect();
     renderSchedules();
@@ -774,6 +1080,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("auth-field").hidden = false;
       restoreToken();
       document.getElementById("auth-token").addEventListener("change", persistToken);
+    }
+    // Check if decryption failed (shown in auth-required response)
+    if (data.decryptionFailed) {
+      document.getElementById("password-warning").hidden = false;
     }
   } catch {
     // not critical

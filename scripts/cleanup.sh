@@ -9,12 +9,10 @@ set -euo pipefail
 CONFIG_NAME="${1:-}"
 RETENTION="${2:-5}"
 BACKUP_DIR="/data/backups"
-LOG_FILE="/data/logs/backup.log"
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] CLEANUP: $*"
     echo "$msg"
-    echo "$msg" >> "$LOG_FILE"
 }
 
 if [[ -z "$CONFIG_NAME" ]]; then

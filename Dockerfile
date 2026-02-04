@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mariadb-client \
     gzip \
     cron \
+    curl \
     ca-certificates \
     tini \
     jq \
@@ -23,7 +24,7 @@ COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh scripts/*.sh
 
-VOLUME ["/data/backups", "/data/config"]
+VOLUME ["/data"]
 EXPOSE 3500
 
 ENTRYPOINT ["tini", "--"]

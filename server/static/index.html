@@ -18,6 +18,11 @@
   </header>
 
   <main>
+    <div id="password-warning" class="warning-banner" hidden>
+      <span><strong>Warning:</strong> Stored passwords could not be decrypted. Please re-enter database passwords.</span>
+      <button class="small" onclick="hidePasswordWarning()">Dismiss</button>
+    </div>
+
     <section id="trigger-section">
       <h2>Run backup</h2>
       <div class="trigger-controls">
@@ -66,6 +71,15 @@
             <input type="text" id="db-form-user" placeholder="db_user" required>
           </div>
           <div class="form-row">
+            <label for="db-form-password">Password</label>
+            <div class="password-row">
+              <input type="password" id="db-form-password" placeholder="password" autocomplete="off">
+              <button type="button" class="small secondary password-toggle" onclick="togglePasswordVisibility()" title="Show/hide password">
+                <span id="password-toggle-text">Show</span>
+              </button>
+            </div>
+          </div>
+          <div class="form-row">
             <label for="db-form-ignored">Ignored tables <span class="text-muted">(one per line, completely excluded)</span></label>
             <textarea id="db-form-ignored" rows="3" placeholder="table_to_skip"></textarea>
           </div>
@@ -73,11 +87,9 @@
             <label for="db-form-structure">Structure-only tables <span class="text-muted">(one per line, schema dumped without data)</span></label>
             <textarea id="db-form-structure" rows="3" placeholder="large_log_table"></textarea>
           </div>
-          <div class="form-row">
-            <span class="text-muted">Password comes from env var DB_PASS_&lt;UPPERCASE_CONFIG_NAME&gt;</span>
-          </div>
           <div class="form-actions">
             <button type="submit">Save database</button>
+            <button type="button" class="secondary" onclick="showSaveTemplateModal()">Save as template</button>
             <button type="button" class="secondary" onclick="hideDbForm()">Cancel</button>
           </div>
         </form>
@@ -86,8 +98,9 @@
 
     <section id="schedules-section">
       <h2>Schedules</h2>
+      <p class="text-muted">Scheduled backups run inside the container as <code>root</code>.</p>
       <table class="backup-table" id="schedules-table">
-        <thead><tr><th>Database</th><th>Cron</th><th>Runs</th><th></th></tr></thead>
+        <thead><tr><th>Database</th><th>Cron</th><th>When</th><th></th></tr></thead>
         <tbody id="schedules-body"></tbody>
       </table>
       <div class="schedule-add-row" id="add-schedule-controls">
@@ -121,11 +134,44 @@
   </main>
 
   <div id="templates-modal" class="modal" hidden>
-    <div class="modal-content">
-      <h3>Choose a template</h3>
+    <div class="modal-content modal-wide">
+      <h3>Templates</h3>
       <div id="templates-list"></div>
       <div class="modal-footer">
         <button class="secondary" onclick="hideTemplatesModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="save-template-modal" class="modal" hidden>
+    <div class="modal-content">
+      <h3>Save as Template</h3>
+      <p class="text-muted">Save the current database configuration as a reusable template.</p>
+      <div class="form-row">
+        <label for="template-name">Template name</label>
+        <input type="text" id="template-name" placeholder="my_template" required>
+        <span class="text-muted small">Only letters, numbers, and underscores allowed</span>
+      </div>
+      <div class="form-row">
+        <label>
+          <input type="checkbox" id="template-include-schedule" checked>
+          Include schedule (0 */6 * * *)
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button onclick="saveAsTemplate()">Save Template</button>
+        <button class="secondary" onclick="hideSaveTemplateModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="template-preview-modal" class="modal" hidden>
+    <div class="modal-content modal-wide">
+      <h3>Template Preview</h3>
+      <div id="template-preview-content"></div>
+      <div class="modal-footer">
+        <button id="template-preview-apply-btn" onclick="applyPreviewedTemplate()">Apply Template</button>
+        <button class="secondary" onclick="hideTemplatePreviewModal()">Close</button>
       </div>
     </div>
   </div>

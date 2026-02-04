@@ -10,16 +10,12 @@
   "imagePassword": "${CI_DEPLOY_PASSWORD}",
   "env": [
     {
-      "name": "DB_PASS_SCONE_PRODUCTION",
-      "value": "${DB_PASS_PRODUCTION}"
-    },
-    {
-      "name": "DB_PASS_SCONE_PREVIEW",
-      "value": "${DB_PASS_PREVIEW}"
-    },
-    {
       "name": "AUTH_TOKEN",
       "value": "${DB_BACKUP_AUTH_TOKEN}"
+    },
+    {
+      "name": "ENCRYPTION_SECRET",
+      "value": "${DB_BACKUP_ENCRYPTION_SECRET}"
     }
   ],
   "cpu": 2000,

@@ -8,13 +8,11 @@ set -euo pipefail
 CONFIG_NAME="${1:-}"
 CONFIG_FILE="/data/config/config.json"
 BACKUP_DIR="/data/backups"
-LOG_FILE="/data/logs/backup.log"
 LOCK_FILE="/tmp/backup-${CONFIG_NAME:-unknown}.lock"
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
-    echo "$msg" >> "$LOG_FILE"
 }
 
 error() {
@@ -55,12 +53,26 @@ if [[ -z "$DB_NAME" || "$DB_NAME" == "null" ]]; then
     error "No database config found for: $CONFIG_NAME"
 fi
 
-# Get password from environment variable: config name -> DB_PASS_UPPERCASE_NAME
-PASSWORD_VAR="DB_PASS_$(echo "$CONFIG_NAME" | tr '[:lower:]' '[:upper:]')"
-DB_PASSWORD="${!PASSWORD_VAR:-}"
+# Get password from env var or API
 
-if [[ -z "$DB_PASSWORD" ]]; then
-    error "Password not set. Please set $PASSWORD_VAR environment variable."
+# First try env var (server-triggered runs pass DB_PASSWORD)
+if [[ -n "${DB_PASSWORD:-}" ]]; then
+    log "Using password from environment"
+# Otherwise try API (cron jobs)
+elif [[ -n "${AUTH_TOKEN:-}" ]]; then
+    API_URL="http://localhost:${PORT:-3500}/api/passwords/${CONFIG_NAME}"
+    log "Fetching password from API: $API_URL"
+    
+    API_RESPONSE=$(curl -fsS --max-time 10 -H "Authorization: Bearer $AUTH_TOKEN" "$API_URL") ||
+        error "Failed to fetch password from API. Ensure AUTH_TOKEN is set correctly and password is configured for '$CONFIG_NAME'."
+    
+    DB_PASSWORD=$(echo "$API_RESPONSE" | jq -r '.password // empty')
+    
+    if [[ -z "$DB_PASSWORD" ]]; then
+        error "Password not found for '$CONFIG_NAME'. Please configure the password via UI."
+    fi
+else
+    error "No password available. Set AUTH_TOKEN for API access or DB_PASSWORD env var."
 fi
 
 # Test connection

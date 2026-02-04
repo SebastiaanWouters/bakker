@@ -16,3 +16,6 @@ Thumbs.db
 
 # Logs & runtime data
 *.log
+
+# Local tooling artifacts
+tmp/

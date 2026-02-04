@@ -32,8 +32,11 @@ generate_crontab() {
         echo "PATH=/usr/local/bin:/usr/bin:/bin"
         echo ""
 
-        # Pass through all DB_PASS_* env vars dynamically
-        env | grep '^DB_PASS_' || true
+        # Pass AUTH_TOKEN for backup script to retrieve passwords
+        if [[ -n "${AUTH_TOKEN:-}" ]]; then
+            echo "AUTH_TOKEN=$AUTH_TOKEN"
+        fi
+        echo "PORT=${PORT:-3500}"
         echo ""
 
         # Generate a cron line for each schedule entry
@@ -45,7 +48,7 @@ generate_crontab() {
             db=$(jq -r ".schedules[$i].database" "$CONFIG_FILE")
             cron_expr=$(jq -r ".schedules[$i].cron" "$CONFIG_FILE")
             if [[ -n "$db" && "$db" != "null" && -n "$cron_expr" && "$cron_expr" != "null" ]]; then
-                echo "$cron_expr root flock -n /tmp/backup-${db}.lock /app/scripts/backup.sh $db >> $LOG_FILE 2>&1"
+                echo "$cron_expr root /app/scripts/backup.sh $db >> $LOG_FILE 2>&1"
             fi
         done
         echo "" # trailing newline required by cron

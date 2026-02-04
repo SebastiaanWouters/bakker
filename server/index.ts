@@ -1,65 +1,20 @@
-import { readdir, stat, unlink, readFile, writeFile, exists } from "node:fs/promises";
+import { readdir, stat, unlink, readFile, writeFile, exists, chmod } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "node:crypto";
 
 const PORT = parseInt(process.env.PORT || "3500", 10);
 const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
+const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "";
 const BACKUP_DIR = "/data/backups";
 const CONFIG_FILE = "/data/config/config.json";
+const TEMPLATES_FILE = "/data/config/templates.json";
+const PASSWORDS_FILE = "/data/config/passwords.enc";
 const LOG_FILE = "/data/logs/backup.log";
 const STATUS_FILE = "/tmp/backup-status.json";
 const STATIC_DIR = resolve(import.meta.dir, "static");
 
-// --- SCONE templates for quick setup ---
-
-const TEMPLATES: Record<string, { databases: Record<string, any>; schedules: any[] }> = {
-  scone_production: {
-    databases: {
-      scone_production: {
-        db_host: "icts-db-gbwdb1.icts.kuleuven.be",
-        db_port: "3306",
-        db_name: "scone_production",
-        db_user: "scone_production",
-        ignored_tables: [],
-        structure_only_tables: [
-          "cron_report",
-          "cron_job",
-          "DoctrineResultCache",
-          "log__entries",
-          "log__user_actions",
-          "voucher",
-          "voucher_backup",
-          "Route",
-          "messenger_messages",
-        ],
-      },
-    },
-    schedules: [{ database: "scone_production", cron: "0 */6 * * *" }],
-  },
-  scone_preview: {
-    databases: {
-      scone_preview: {
-        db_host: "icts-db-gbwdb1.icts.kuleuven.be",
-        db_port: "3306",
-        db_name: "scone_preview",
-        db_user: "scone_preview",
-        ignored_tables: [],
-        structure_only_tables: [
-          "cron_report",
-          "cron_job",
-          "DoctrineResultCache",
-          "log__entries",
-          "log__user_actions",
-          "voucher",
-          "voucher_backup",
-          "Route",
-          "messenger_messages",
-        ],
-      },
-    },
-    schedules: [{ database: "scone_preview", cron: "0 */6 * * *" }],
-  },
-};
+const ALGORITHM = "aes-256-gcm";
 
 // --- Auth ---
 
@@ -73,6 +28,144 @@ function checkAuth(req: Request): Response | null {
   return null;
 }
 
+// --- Password Encryption ---
+
+function deriveKey(secret: string, saltHex: string): Buffer {
+  return scryptSync(secret, Buffer.from(saltHex, "hex"), 32);
+}
+
+function hashSecret(secret: string): string {
+  return createHash("sha256").update(secret).digest("hex");
+}
+
+interface EncryptedData {
+  secretHash: string;
+  salt: string;
+  iv: string;
+  authTag: string;
+  encrypted: string;
+}
+
+function encrypt(text: string, secret: string): EncryptedData {
+  const salt = randomBytes(16);
+  const key = deriveKey(secret, salt.toString("hex"));
+  const iv = randomBytes(16);
+  const cipher = createCipheriv(ALGORITHM, key, iv);
+  let encrypted = cipher.update(text, "utf8", "hex");
+  encrypted += cipher.final("hex");
+  const authTag = cipher.getAuthTag();
+  return {
+    secretHash: hashSecret(secret),
+    salt: salt.toString("hex"),
+    iv: iv.toString("hex"),
+    authTag: authTag.toString("hex"),
+    encrypted,
+  };
+}
+
+function decrypt(data: EncryptedData, secret: string): string | null {
+  try {
+    // Verify secret hash first
+    if (data.secretHash !== hashSecret(secret)) {
+      return null;
+    }
+    const saltHex = typeof data.salt === "string" && data.salt.length > 0 ? data.salt : "64622d6261636b75702d73616c74";
+    const key = deriveKey(secret, saltHex);
+    const iv = Buffer.from(data.iv, "hex");
+    const authTag = Buffer.from(data.authTag, "hex");
+    const decipher = createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(data.encrypted, "hex", "utf8");
+    decrypted += decipher.final("utf8");
+    return decrypted;
+  } catch {
+    return null;
+  }
+}
+
+// --- Password Store ---
+
+let decryptionFailed = false;
+
+async function readPasswords(): Promise<Map<string, string>> {
+  const passwords = new Map<string, string>();
+  
+  if (!ENCRYPTION_SECRET) {
+    return passwords;
+  }
+  
+  try {
+    const raw = await readFile(PASSWORDS_FILE, "utf-8");
+    if (!raw.trim()) {
+      return passwords;
+    }
+    const data: EncryptedData = JSON.parse(raw);
+    const decrypted = decrypt(data, ENCRYPTION_SECRET);
+    
+    if (decrypted === null) {
+      decryptionFailed = true;
+      console.warn("[passwords] Decryption failed - cannot decrypt stored passwords");
+      return passwords;
+    }
+    
+    const parsed = JSON.parse(decrypted);
+    for (const [key, value] of Object.entries(parsed)) {
+      passwords.set(key, value as string);
+    }
+    decryptionFailed = false;
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      decryptionFailed = false;
+      return passwords;
+    }
+
+    // Parse errors, corrupt file, etc.
+    decryptionFailed = true;
+    console.error("[passwords] Error reading passwords:", err.message);
+  }
+  
+  return passwords;
+}
+
+async function writePasswords(passwords: Map<string, string>): Promise<void> {
+  if (!ENCRYPTION_SECRET) {
+    throw new Error("ENCRYPTION_SECRET not configured");
+  }
+  
+  const obj: Record<string, string> = {};
+  for (const [key, value] of passwords) {
+    obj[key] = value;
+  }
+  
+  const encrypted = encrypt(JSON.stringify(obj), ENCRYPTION_SECRET);
+  await writeFile(PASSWORDS_FILE, JSON.stringify(encrypted, null, 2) + "\n", "utf-8");
+  await chmod(PASSWORDS_FILE, 0o600);
+}
+
+async function setPassword(configName: string, password: string): Promise<void> {
+  const passwords = await readPasswords();
+  passwords.set(configName, password);
+  await writePasswords(passwords);
+}
+
+async function deletePassword(configName: string): Promise<void> {
+  const passwords = await readPasswords();
+  if (passwords.has(configName)) {
+    passwords.delete(configName);
+    await writePasswords(passwords);
+  }
+}
+
+async function getPassword(configName: string): Promise<string | null> {
+  const passwords = await readPasswords();
+  return passwords.get(configName) || null;
+}
+
+async function listPasswordConfigs(): Promise<string[]> {
+  const passwords = await readPasswords();
+  return Array.from(passwords.keys());
+}
+
 // --- Config migration (old environments format -> new databases/schedules format) ---
 
 function migrateConfig(config: any): { config: any; migrated: boolean } {
@@ -83,28 +176,17 @@ function migrateConfig(config: any): { config: any; migrated: boolean } {
   const schedule = config.schedule || "0 */6 * * *";
 
   for (const [env, envCfg] of Object.entries(config.environments) as [string, any][]) {
-    const configName = `scone_${env}`;
-    databases[configName] = {
+    databases[env] = {
       db_host: envCfg.db_host,
       db_port: envCfg.db_port || "3306",
       db_name: envCfg.db_name,
       db_user: envCfg.db_user,
       ignored_tables: [],
-      structure_only_tables: [
-        "cron_report",
-        "cron_job",
-        "DoctrineResultCache",
-        "log__entries",
-        "log__user_actions",
-        "voucher",
-        "voucher_backup",
-        "Route",
-        "messenger_messages",
-      ],
+      structure_only_tables: [],
     };
 
     if (envCfg.enabled) {
-      schedules.push({ database: configName, cron: schedule });
+      schedules.push({ database: env, cron: schedule });
     }
   }
 
@@ -132,6 +214,21 @@ async function writeConfig(config: any): Promise<void> {
   await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
+// --- Template storage ---
+
+async function readTemplates(): Promise<Record<string, { databases: Record<string, any>; schedules: any[] }>> {
+  try {
+    const raw = await readFile(TEMPLATES_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function writeTemplates(templates: Record<string, { databases: Record<string, any>; schedules: any[] }>): Promise<void> {
+  await writeFile(TEMPLATES_FILE, JSON.stringify(templates, null, 2) + "\n", "utf-8");
+}
+
 // --- Crontab generation ---
 
 function regenerateCrontab(config: any): void {
@@ -142,12 +239,11 @@ function regenerateCrontab(config: any): void {
     "",
   ];
 
-  // Pass through all DB_PASS_* env vars dynamically
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith("DB_PASS_") && value) {
-      lines.push(`${key}=${value}`);
-    }
+  // Pass AUTH_TOKEN for backup script to retrieve passwords
+  if (AUTH_TOKEN) {
+    lines.push(`AUTH_TOKEN=${AUTH_TOKEN}`);
   }
+  lines.push(`PORT=${PORT}`);
   lines.push("");
 
   for (const schedule of config.schedules || []) {
@@ -155,7 +251,7 @@ function regenerateCrontab(config: any): void {
     const cron = schedule.cron;
     if (db && cron) {
       lines.push(
-        `${cron} root flock -n /tmp/backup-${db}.lock /app/scripts/backup.sh ${db} >> /data/logs/backup.log 2>&1`
+        `${cron} root /app/scripts/backup.sh ${db} >> /data/logs/backup.log 2>&1`
       );
     }
   }
@@ -252,8 +348,16 @@ interface BackupInfo {
   filename: string;
   size: number;
   sizeMB: string;
+  sizeHuman: string;
   date: string;
   database: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 async function listBackups(): Promise<Record<string, BackupInfo[]>> {
@@ -279,6 +383,7 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
       filename: file,
       size: fileStat.size,
       sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
+      sizeHuman: formatBytes(fileStat.size),
       date: formattedDate,
       database,
     });
@@ -295,11 +400,15 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   return grouped;
 }
 
-function triggerBackup(database: string): Promise<{ success: boolean; message: string }> {
+function triggerBackup(database: string, password?: string): Promise<{ success: boolean; message: string }> {
   return new Promise((resolve) => {
+    const env = { ...process.env };
+    if (password) {
+      env.DB_PASSWORD = password;
+    }
     const proc = spawn("/app/scripts/backup.sh", [database], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      env,
     });
 
     let stdout = "";
@@ -343,14 +452,188 @@ const server = Bun.serve({
     const path = url.pathname;
     const method = req.method;
 
+    if (path.startsWith("/api/") && path !== "/api/auth-required") {
+      const authErr = checkAuth(req);
+      if (authErr) return authErr;
+    }
+
     // GET /api/auth-required
     if (method === "GET" && path === "/api/auth-required") {
-      return json({ required: !!AUTH_TOKEN });
+      if (ENCRYPTION_SECRET) {
+        await readPasswords();
+      }
+      return json({ required: !!AUTH_TOKEN, decryptionFailed, encryptionConfigured: !!ENCRYPTION_SECRET });
     }
 
     // GET /api/templates
     if (method === "GET" && path === "/api/templates") {
-      return json(TEMPLATES);
+      const templates = await readTemplates();
+      return json(templates);
+    }
+
+    // POST /api/templates - create new template
+    if (method === "POST" && path === "/api/templates") {
+      const authErr = checkAuth(req);
+      if (authErr) return authErr;
+
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      const { name, template } = body;
+      if (!name || typeof name !== "string") {
+        return json({ error: "Missing or invalid 'name' field" }, 400);
+      }
+      if (!template || typeof template !== "object") {
+        return json({ error: "Missing or invalid 'template' field" }, 400);
+      }
+      if (!template.databases || typeof template.databases !== "object") {
+        return json({ error: "Template must have 'databases' object" }, 400);
+      }
+      if (!Array.isArray(template.schedules)) {
+        return json({ error: "Template must have 'schedules' array" }, 400);
+      }
+
+      const templates = await readTemplates();
+      if (templates[name]) {
+        return json({ error: `Template '${name}' already exists` }, 409);
+      }
+
+      templates[name] = template;
+      await writeTemplates(templates);
+      return json({ success: true, name });
+    }
+
+    // PUT /api/templates/:name - update template
+    if (method === "PUT" && path.startsWith("/api/templates/")) {
+      const authErr = checkAuth(req);
+      if (authErr) return authErr;
+
+      const name = decodeURIComponent(path.slice("/api/templates/".length));
+      if (!name) {
+        return json({ error: "Template name required" }, 400);
+      }
+
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      if (!body.template || typeof body.template !== "object") {
+        return json({ error: "Missing or invalid 'template' field" }, 400);
+      }
+      if (!body.template.databases || typeof body.template.databases !== "object") {
+        return json({ error: "Template must have 'databases' object" }, 400);
+      }
+      if (!Array.isArray(body.template.schedules)) {
+        return json({ error: "Template must have 'schedules' array" }, 400);
+      }
+
+      const templates = await readTemplates();
+      if (!templates[name]) {
+        return json({ error: `Template '${name}' not found` }, 404);
+      }
+
+      templates[name] = body.template;
+      await writeTemplates(templates);
+      return json({ success: true, name });
+    }
+
+    // DELETE /api/templates/:name - delete template
+    if (method === "DELETE" && path.startsWith("/api/templates/")) {
+      const authErr = checkAuth(req);
+      if (authErr) return authErr;
+
+      const name = decodeURIComponent(path.slice("/api/templates/".length));
+      if (!name) {
+        return json({ error: "Template name required" }, 400);
+      }
+
+      const templates = await readTemplates();
+      if (!templates[name]) {
+        return json({ error: `Template '${name}' not found` }, 404);
+      }
+
+      delete templates[name];
+      await writeTemplates(templates);
+      return json({ success: true });
+    }
+
+    // GET /api/passwords - list configs with passwords
+    if (method === "GET" && path === "/api/passwords") {
+      const config = await readConfig();
+      const configured = new Set(Object.keys(config.databases || {}));
+      const configs = (await listPasswordConfigs()).filter((name) => configured.has(name));
+      return json({ configs, decryptionFailed });
+    }
+
+    // GET /api/passwords/:configName - get password (internal use by backup script)
+    if (method === "GET" && path.startsWith("/api/passwords/")) {
+      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      if (!configName) {
+        return json({ error: "Config name required" }, 400);
+      }
+
+      const config = await readConfig();
+      if (!config.databases?.[configName]) {
+        return json({ error: `Database '${configName}' not found in config` }, 404);
+      }
+
+      const password = await getPassword(configName);
+      if (!password) {
+        return json({ error: "Password not found" }, 404);
+      }
+      return json({ password });
+    }
+
+    // POST /api/passwords/:configName - save password
+    if (method === "POST" && path.startsWith("/api/passwords/")) {
+      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      if (!configName) {
+        return json({ error: "Config name required" }, 400);
+      }
+
+      const config = await readConfig();
+      if (!config.databases?.[configName]) {
+        return json({ error: `Database '${configName}' not found in config` }, 400);
+      }
+
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!body.password || typeof body.password !== "string") {
+        return json({ error: "Missing or invalid 'password' field" }, 400);
+      }
+      try {
+        await setPassword(configName, body.password);
+        return json({ success: true });
+      } catch (err: any) {
+        return json({ error: err.message }, 500);
+      }
+    }
+
+    // DELETE /api/passwords/:configName - delete password
+    if (method === "DELETE" && path.startsWith("/api/passwords/")) {
+      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      if (!configName) {
+        return json({ error: "Config name required" }, 400);
+      }
+
+      const config = await readConfig();
+      if (!config.databases?.[configName]) {
+        return json({ error: `Database '${configName}' not found in config` }, 400);
+      }
+
+      await deletePassword(configName);
+      return json({ success: true });
     }
 
     // GET /api/backups
@@ -422,7 +705,13 @@ const server = Bun.serve({
         return json({ error: `Database '${database}' not found in config` }, 400);
       }
 
-      triggerBackup(database).then((result) => {
+      // Get password for this database
+      const password = await getPassword(database);
+      if (!password) {
+        return json({ error: `No password configured for '${database}'. Please set the password in the database configuration.` }, 400);
+      }
+
+      triggerBackup(database, password).then((result) => {
         console.log(`Backup ${database} finished:`, result.success ? "OK" : result.message);
       });
 

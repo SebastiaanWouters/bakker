@@ -177,6 +177,7 @@ h3 {
 
 select,
 input[type="text"],
+input[type="password"],
 input[type="number"] {
   background: transparent;
   color: var(--text);
@@ -300,6 +301,14 @@ button.secondary:hover {
   font-size: var(--text-sm);
 }
 
+@media (max-width: 720px) {
+  .backup-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 .backup-table th {
   text-align: left;
   padding: var(--space-2) var(--space-3);
@@ -343,6 +352,53 @@ button.secondary:hover {
   display: flex;
   gap: var(--space-2);
   justify-content: flex-end;
+}
+
+/* --- Responsive --- */
+
+@media (max-width: 720px) {
+  header {
+    padding: var(--space-4) var(--space-4);
+  }
+
+  .header-right {
+    gap: var(--space-3);
+  }
+
+  .auth-field input {
+    width: 120px;
+  }
+
+  main {
+    padding: var(--space-8) var(--space-4);
+  }
+
+  .trigger-controls {
+    flex-wrap: wrap;
+  }
+
+  .trigger-controls select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  #trigger-btn {
+    width: 100%;
+  }
+
+  .backup-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .schedule-add-row select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .schedule-add-row input[type="text"] {
+    width: 100%;
+  }
 }
 
 .backup-actions a {
@@ -562,6 +618,10 @@ button.secondary:hover {
   overflow-y: auto;
 }
 
+.modal-content.modal-wide {
+  max-width: 640px;
+}
+
 .modal-content h3 {
   font-size: var(--text-lg);
   font-weight: 300;
@@ -582,7 +642,6 @@ button.secondary:hover {
   border-left: 3px solid var(--border);
   padding: var(--space-3) var(--space-4);
   margin-bottom: var(--space-2);
-  cursor: pointer;
   transition: border-color 0.12s, background 0.12s;
 }
 
@@ -599,6 +658,118 @@ button.secondary:hover {
 
 .template-item .text-muted {
   margin-top: 2px;
+}
+
+.template-card {
+  border-left: 3px solid var(--border);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+  background: var(--surface-raised);
+  transition: border-color 0.12s;
+}
+
+.template-card:hover {
+  border-color: var(--accent);
+}
+
+.template-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.template-card-header strong {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.template-card-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.template-card-body {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.template-card-body .template-db-list {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-top: var(--space-1);
+}
+
+.template-preview-section {
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.template-preview-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.template-preview-section h4 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-2);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.template-preview-db {
+  background: var(--surface);
+  border-left: 2px solid var(--border);
+  padding: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.template-preview-db:last-child {
+  margin-bottom: 0;
+}
+
+.template-preview-db .db-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  margin-bottom: var(--space-1);
+}
+
+.template-preview-db .db-details {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.template-preview-schedule {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
+}
+
+.template-preview-schedule code {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  padding: 2px 6px;
+}
+
+.text-muted.small {
+  font-size: var(--text-xs);
+  margin-top: 2px;
+  display: block;
+}
+
+input[type="checkbox"] {
+  margin-right: var(--space-2);
+  accent-color: var(--accent);
 }
 
 /* --- Logs --- */
@@ -678,6 +849,64 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   outline: none;
+}
+
+/* --- Password Input --- */
+
+.password-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-end;
+  flex-wrap: wrap;
+  max-width: 440px;
+}
+
+.password-row input[type="password"],
+.password-row input[type="text"] {
+  flex: 1;
+  min-width: 220px;
+}
+
+.password-toggle {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+/* --- Warning Banner --- */
+
+.warning-banner {
+  background: var(--warning-subtle);
+  color: var(--warning);
+  border-left: 3px solid var(--warning);
+  padding: var(--space-4) var(--space-6);
+  margin-bottom: var(--space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.warning-banner[hidden] {
+  display: none;
+}
+
+.warning-banner button {
+  flex-shrink: 0;
+}
+
+/* --- Password Status --- */
+
+.password-status {
+  font-size: var(--text-xs);
+  margin-left: var(--space-2);
+}
+
+.password-status.locked {
+  color: var(--success);
+}
+
+.password-status.unlocked {
+  color: var(--warning);
 }
 
 /* --- Code --- */
