@@ -173,7 +173,7 @@
       ],
       "tracer_bullet": "Reload UI and confirm title and header brand",
       "dependencies": [],
-      "status": "todo",
+      "status": "done",
       "notes": "Limit scope to UI branding strings."
     }
   ]

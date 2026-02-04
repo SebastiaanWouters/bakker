@@ -35,3 +35,19 @@ Post-Iteration Actions:
 - review
 - commit
 
+Iteration: 3
+Task: T-003 Update UI branding to bakker
+Status: done
+Decisions:
+- Updated document title and header brand to "bakker".
+Learnings:
+- Branding is localized to static HTML.
+Next:
+- None (all tasks complete)
+Post-Iteration Actions:
+- qa
+- simplify
+- deslop
+- review
+- commit
+
