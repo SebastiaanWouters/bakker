@@ -25,6 +25,7 @@ COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh scripts/*.sh
 
 VOLUME ["/data"]
+ENV HOST=::
 EXPOSE 3500
 
 ENTRYPOINT ["tini", "--"]

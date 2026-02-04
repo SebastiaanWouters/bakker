@@ -16,10 +16,12 @@ docker run --name bakker \
   -v bakker-data:/data \
   -e AUTH_TOKEN=change-me \
   -e ENCRYPTION_SECRET=change-me-too \
+  -e HOST=:: \
   sebaswouters/bakker:latest
 ```
 
 Then open `http://localhost:3500` and configure databases + schedules.
+If you want IPv6 connectivity, ensure Docker IPv6 is enabled on your daemon and publish IPv6 ports accordingly.
 
 ## Docker Compose
 
@@ -35,6 +37,7 @@ services:
       AUTH_TOKEN: "change-me"
       ENCRYPTION_SECRET: "change-me-too"
       PORT: "3500"
+      HOST: "::"
 volumes:
   bakker-data:
 ```
@@ -71,6 +74,7 @@ Data is stored under `/data` (mounted volume recommended):
 ## Environment Variables
 
 - `PORT` (default `3500`) - HTTP server port.
+- `HOST` (default `::`) - HTTP server bind address. Use `::` for IPv6, `0.0.0.0` for IPv4.
 - `AUTH_TOKEN` - if set, all `/api/*` endpoints require `Authorization: Bearer <token>`.
 - `ENCRYPTION_SECRET` - required to store and retrieve encrypted DB passwords.
 

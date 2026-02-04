@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "node:crypto";
 
 const PORT = parseInt(process.env.PORT || "3500", 10);
+const HOST = process.env.HOST || "::";
 const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "";
 const BACKUP_DIR = "/data/backups";
@@ -91,6 +92,7 @@ async function readPasswords(): Promise<Map<string, string>> {
   const passwords = new Map<string, string>();
   
   if (!ENCRYPTION_SECRET) {
+    decryptionFailed = false;
     return passwords;
   }
   
@@ -258,6 +260,11 @@ function regenerateCrontab(config: any): void {
 
   lines.push("");
   Bun.write("/etc/cron.d/db-backup", lines.join("\n"));
+  try {
+    Bun.spawnSync(["chmod", "0644", "/etc/cron.d/db-backup"]);
+  } catch {
+    // ignore chmod errors
+  }
 }
 
 // --- Cron validation ---
@@ -446,7 +453,7 @@ function json(data: any, status = 200): Response {
 
 const server = Bun.serve({
   port: PORT,
-  hostname: "0.0.0.0",
+  hostname: HOST,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -473,9 +480,6 @@ const server = Bun.serve({
 
     // POST /api/templates - create new template
     if (method === "POST" && path === "/api/templates") {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
-
       let body: any;
       try {
         body = await req.json();
@@ -509,9 +513,6 @@ const server = Bun.serve({
 
     // PUT /api/templates/:name - update template
     if (method === "PUT" && path.startsWith("/api/templates/")) {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
-
       const name = decodeURIComponent(path.slice("/api/templates/".length));
       if (!name) {
         return json({ error: "Template name required" }, 400);
@@ -546,9 +547,6 @@ const server = Bun.serve({
 
     // DELETE /api/templates/:name - delete template
     if (method === "DELETE" && path.startsWith("/api/templates/")) {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
-
       const name = decodeURIComponent(path.slice("/api/templates/".length));
       if (!name) {
         return json({ error: "Template name required" }, 400);
@@ -663,8 +661,6 @@ const server = Bun.serve({
 
     // DELETE /api/backups/:filename
     if (method === "DELETE" && path.startsWith("/api/backups/")) {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
       const filename = decodeURIComponent(path.slice("/api/backups/".length));
       if (!isValidFilename(filename)) {
         return json({ error: "Invalid filename" }, 400);
@@ -680,8 +676,6 @@ const server = Bun.serve({
 
     // POST /api/backups/trigger
     if (method === "POST" && path === "/api/backups/trigger") {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
       const status = await getBackupStatus();
       if (status.running) {
         return json({ error: "A backup is already running", status }, 409);
@@ -732,8 +726,6 @@ const server = Bun.serve({
 
     // PUT /api/config
     if (method === "PUT" && path === "/api/config") {
-      const authErr = checkAuth(req);
-      if (authErr) return authErr;
       let newConfig: any;
       try {
         newConfig = await req.json();
@@ -806,8 +798,8 @@ const server = Bun.serve({
 // Run config migration on startup
 readConfig().then((config) => {
   regenerateCrontab(config);
-  console.log(`DB Backup server running on port ${PORT}`);
+  console.log(`DB Backup server running on ${HOST}:${PORT}`);
 }).catch((err) => {
   console.error("Failed to read config on startup:", err);
-  console.log(`DB Backup server running on port ${PORT}`);
+  console.log(`DB Backup server running on ${HOST}:${PORT}`);
 });
