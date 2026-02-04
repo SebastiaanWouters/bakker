@@ -88,10 +88,14 @@ function expandField(field, min, max) {
     if (base === "*") {
       for (let i = min; i <= max; i += step) results.add(i);
     } else if (base.includes("-")) {
-      const [lo, hi] = base.split("-").map((v) => parseInt(v, 10));
+      const [loRaw, hiRaw] = base.split("-");
+      const lo = resolveAlias(loRaw, min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1) ?? parseInt(loRaw, 10);
+      const hi = resolveAlias(hiRaw, min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1) ?? parseInt(hiRaw, 10);
       for (let i = lo; i <= hi; i += step) results.add(i);
     } else {
-      results.add(parseInt(base, 10));
+      const aliasIdx = min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1;
+      const resolved = aliasIdx === -1 ? null : resolveAlias(base, aliasIdx);
+      results.add(resolved ?? parseInt(base, 10));
     }
   }
   return [...results].sort((a, b) => a - b);

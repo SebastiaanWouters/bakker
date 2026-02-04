@@ -52,6 +52,12 @@ DB_USER=$(jq -r ".databases.\"${CONFIG_NAME}\".db_user" "$CONFIG_FILE")
 if [[ -z "$DB_NAME" || "$DB_NAME" == "null" ]]; then
     error "No database config found for: $CONFIG_NAME"
 fi
+if [[ -z "$DB_HOST" || "$DB_HOST" == "null" ]]; then
+    error "Missing db_host for: $CONFIG_NAME"
+fi
+if [[ -z "$DB_USER" || "$DB_USER" == "null" ]]; then
+    error "Missing db_user for: $CONFIG_NAME"
+fi
 
 # Get password from env var or API
 

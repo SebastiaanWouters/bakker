@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  bakker:
+    build: .
+    ports:
+      - "3500:3500"
+    environment:
+      AUTH_TOKEN: "change-me"
+      ENCRYPTION_SECRET: "change-me"
+      HOST: "0.0.0.0"
+      PORT: "3500"
+    volumes:
+      - bakker-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: "bakker_test"
+      MARIADB_USER: "bakker"
+      MARIADB_PASSWORD: "bakker_pass"
+      MARIADB_ROOT_PASSWORD: "root_pass"
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-proot_pass"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - mariadb-data:/var/lib/mysql
+
+volumes:
+  bakker-data:
+  mariadb-data:
