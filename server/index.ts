@@ -776,8 +776,11 @@ const server = Bun.serve({
       if (!template.databases || typeof template.databases !== "object") {
         return json({ error: "Template must have 'databases' object" }, 400);
       }
-      if (!Array.isArray(template.schedules)) {
-        return json({ error: "Template must have 'schedules' array" }, 400);
+      if ("schedules" in template) {
+        return json(
+          { error: "Templates do not support schedules. Remove 'schedules'." },
+          400,
+        );
       }
 
       const templates = await readTemplates();
@@ -813,8 +816,11 @@ const server = Bun.serve({
       ) {
         return json({ error: "Template must have 'databases' object" }, 400);
       }
-      if (!Array.isArray(body.template.schedules)) {
-        return json({ error: "Template must have 'schedules' array" }, 400);
+      if ("schedules" in body.template) {
+        return json(
+          { error: "Templates do not support schedules. Remove 'schedules'." },
+          400,
+        );
       }
 
       const templates = await readTemplates();

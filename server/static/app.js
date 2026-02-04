@@ -1099,16 +1099,8 @@ async function saveAsTemplate() {
     structure_only_tables: values.structure_only_tables,
   };
 
-  const includeSchedule = document.getElementById(
-    "template-include-schedule",
-  ).checked;
-  const schedules = includeSchedule
-    ? [{ database: values.name, cron: "0 */6 * * *" }]
-    : [];
-
   const template = {
     databases: { [values.name]: dbConfig },
-    schedules: schedules,
   };
 
   try {
@@ -1143,10 +1135,6 @@ async function showTemplatesModal() {
           const t = templates[name] || {};
           const dbNames = Object.keys(t.databases || {});
           const dbCount = dbNames.length;
-          const scheduleCount = Array.isArray(t.schedules)
-            ? t.schedules.length
-            : 0;
-
           return `<div class="template-card">
           <div class="template-card-header">
             <strong>${name}</strong>
@@ -1158,7 +1146,7 @@ async function showTemplatesModal() {
             </div>
           </div>
           <div class="template-card-body">
-            ${dbCount} database${dbCount !== 1 ? "s" : ""}${scheduleCount > 0 ? `, ${scheduleCount} schedule${scheduleCount !== 1 ? "s" : ""}` : ""}
+            ${dbCount} database${dbCount !== 1 ? "s" : ""}
             <div class="template-db-list">${dbNames.join(", ")}</div>
           </div>
         </div>`;
@@ -1178,7 +1166,11 @@ function showTemplateEditModal(name, template) {
   const jsonInput = document.getElementById("template-edit-json");
   if (!modal || !nameInput || !jsonInput) return;
   nameInput.value = name;
-  jsonInput.value = JSON.stringify(template, null, 2);
+  const cleaned = { ...(template || {}) };
+  if (cleaned && typeof cleaned === "object" && "schedules" in cleaned) {
+    delete cleaned.schedules;
+  }
+  jsonInput.value = JSON.stringify(cleaned, null, 2);
   modal.hidden = false;
 }
 
@@ -1219,14 +1211,18 @@ async function saveEditedTemplate() {
     return;
   }
 
+  if (template && typeof template === "object" && "schedules" in template) {
+    delete template.schedules;
+    showToast("Schedules were removed. Templates only store databases.");
+  }
+
   if (
     !template ||
     typeof template !== "object" ||
     !template.databases ||
-    typeof template.databases !== "object" ||
-    !Array.isArray(template.schedules)
+    typeof template.databases !== "object"
   ) {
-    showToast("Template must include 'databases' and 'schedules'", "error");
+    showToast("Template must include 'databases'", "error");
     return;
   }
 
@@ -1246,6 +1242,24 @@ async function saveEditedTemplate() {
 
 function hideTemplatesModal() {
   document.getElementById("templates-modal").hidden = true;
+}
+
+function populateDbFormFromTemplate(name, cfg) {
+  showAddDbForm();
+  document.getElementById("db-form-name").value = name || "";
+  document.getElementById("db-form-host").value = cfg.db_host || "";
+  document.getElementById("db-form-port").value = cfg.db_port || "3306";
+  document.getElementById("db-form-dbname").value = cfg.db_name || "";
+  document.getElementById("db-form-user").value = cfg.db_user || "";
+  document.getElementById("db-form-password").value = "";
+  document.getElementById("db-form-password").type = "password";
+  document.getElementById("password-toggle-text").textContent = "Show";
+  document.getElementById("db-form-ignored").value = (
+    cfg.ignored_tables || []
+  ).join("\n");
+  document.getElementById("db-form-structure").value = (
+    cfg.structure_only_tables || []
+  ).join("\n");
 }
 
 async function previewTemplate(name) {
@@ -1282,33 +1296,10 @@ async function previewTemplate(name) {
       </div>`;
     }
 
-    let scheduleHtml = "";
-    const templateSchedules = Array.isArray(template.schedules)
-      ? template.schedules
-      : [];
-    if (templateSchedules.length > 0) {
-      scheduleHtml = templateSchedules
-        .map((s) => {
-          const human = cronToHuman(s.cron) || s.cron;
-          return `<div class="template-preview-schedule">
-          <code>${s.cron}</code>
-          <span class="text-muted">${human}</span>
-          <span>for ${s.database}</span>
-        </div>`;
-        })
-        .join("");
-    } else {
-      scheduleHtml = '<p class="text-muted">No schedules included</p>';
-    }
-
     content.innerHTML = `
       <div class="template-preview-section">
         <h4>Databases (${Object.keys(templateDatabases).length})</h4>
         ${dbHtml}
-      </div>
-      <div class="template-preview-section">
-        <h4>Schedules (${templateSchedules.length})</h4>
-        ${scheduleHtml}
       </div>
     `;
 
@@ -1332,22 +1323,12 @@ async function applyPreviewedTemplate() {
 
 async function applyTemplate(name) {
   try {
-    if (!currentConfig) {
-      if (authRequired && !getAuthToken()) {
-        showToast(
-          "Auth token missing. Enter it above to load configuration.",
-          "error",
-        );
-        return;
-      }
-      await loadConfig({
-        throwOnUnauthorized: true,
-        invalidAuthMessage: "Auth token invalid. Please re-enter.",
-      });
-      if (!currentConfig) {
-        showToast("Config not loaded yet. Please try again.", "error");
-        return;
-      }
+    if (authRequired && !getAuthToken()) {
+      showToast(
+        "Auth token missing. Enter it above to load templates.",
+        "error",
+      );
+      return;
     }
     const templates = await api("/api/templates");
     const template = templates[name];
@@ -1361,38 +1342,21 @@ async function applyTemplate(name) {
       return;
     }
 
-    const config = {
-      ...currentConfig,
-      schedules: Array.isArray(currentConfig.schedules)
-        ? [...currentConfig.schedules]
-        : [],
-      databases: { ...currentConfig.databases, ...template.databases },
-    };
-
-    const existingScheduleKeys = new Set(
-      config.schedules.map((s) => `${s.database}:${s.cron}`),
-    );
-    const templateSchedules = Array.isArray(template.schedules)
-      ? template.schedules
-      : [];
-    for (const schedule of templateSchedules) {
-      const key = `${schedule.database}:${schedule.cron}`;
-      if (!existingScheduleKeys.has(key)) {
-        config.schedules = [...config.schedules, schedule];
-      }
+    const entries = Object.entries(template.databases);
+    if (entries.length === 0) {
+      showToast("Template has no databases.", "error");
+      return;
     }
 
-    await api("/api/config", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(config),
-    });
-    currentConfig = config;
-    renderDbCards();
-    populateTriggerSelect();
-    renderSchedules();
+    const [dbName, dbCfg] = entries[0];
+    populateDbFormFromTemplate(dbName, dbCfg || {});
     hideTemplatesModal();
-    showToast(`Applied "${name}"`);
+    showToast(`Template "${name}" applied to form. Save to persist.`);
+    if (entries.length > 1) {
+      showToast(
+        `Template "${name}" has ${entries.length} databases. Showing the first.`,
+      );
+    }
   } catch (err) {
     showToast(err.message, "error");
   }
