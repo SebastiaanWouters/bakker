@@ -1,12 +1,30 @@
-import { readdir, stat, unlink, readFile, writeFile, exists, chmod, mkdir, appendFile } from "node:fs/promises";
+import {
+  readdir,
+  stat,
+  unlink,
+  readFile,
+  writeFile,
+  exists,
+  chmod,
+  mkdir,
+  appendFile,
+} from "node:fs/promises";
+import { watch } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  randomBytes,
+  scryptSync,
+  createHash,
+} from "node:crypto";
 
 const PORT = parseInt(process.env.PORT || "3500", 10);
 const HOST = process.env.HOST || "::";
 const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "";
+const DEV = process.env.DEV === "1";
 const BACKUP_DIR = "/data/backups";
 const CONFIG_FILE = "/data/config/config.json";
 const TEMPLATES_FILE = "/data/config/templates.json";
@@ -18,6 +36,61 @@ const STATUS_SUFFIX = ".json";
 const STATIC_DIR = resolve(import.meta.dir, "static");
 
 const ALGORITHM = "aes-256-gcm";
+
+// --- Dev Live Reload ---
+
+const devReloadClients = new Set<{ write: (chunk: string) => Promise<void> }>();
+let devReloadWatching = false;
+let devReloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function devReloadBroadcast(): void {
+  for (const writer of devReloadClients) {
+    try {
+      writer.write(`event: reload\ndata: ${Date.now()}\n\n`).catch(() => {
+        devReloadClients.delete(writer);
+      });
+    } catch {
+      devReloadClients.delete(writer);
+    }
+  }
+}
+
+function ensureDevReloadWatcher(): void {
+  if (!DEV || devReloadWatching) return;
+  devReloadWatching = true;
+  try {
+    watch(STATIC_DIR, (_event, _filename) => {
+      if (devReloadTimer !== null) return;
+      devReloadTimer = setTimeout(() => {
+        devReloadTimer = null;
+        devReloadBroadcast();
+      }, 150);
+    });
+  } catch (err) {
+    console.warn("[dev-reload] Failed to start watcher:", err);
+  }
+}
+
+async function serveIndexHtml(): Promise<Response> {
+  if (!DEV) {
+    return new Response(Bun.file(join(STATIC_DIR, "index.html")));
+  }
+  try {
+    const html = await readFile(join(STATIC_DIR, "index.html"), "utf-8");
+    const injected = html.includes("dev-reload.js")
+      ? html
+      : html.replace(
+          "</body>",
+          '  <script src="/dev-reload.js"></script>\n</body>',
+        );
+    return new Response(injected, {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  } catch (err) {
+    console.warn("[dev-reload] Failed to read index.html:", err);
+    return new Response(Bun.file(join(STATIC_DIR, "index.html")));
+  }
+}
 
 // --- Auth ---
 
@@ -880,9 +953,43 @@ const server = Bun.serve({
       }
     }
 
+    // GET /api/dev-reload (dev only)
+    if (method === "GET" && path === "/api/dev-reload") {
+      if (!DEV) return json({ error: "Not found" }, 404);
+
+      ensureDevReloadWatcher();
+      let clientRef: { write: (chunk: string) => Promise<void> } | null = null;
+      const stream = new ReadableStream({
+        start(controller) {
+          const client = {
+            write: async (chunk: string) => {
+              controller.enqueue(chunk);
+            },
+          };
+          clientRef = client;
+          devReloadClients.add(client);
+          controller.enqueue("event: ready\ndata: connected\n\n");
+        },
+        cancel() {
+          if (clientRef) {
+            devReloadClients.delete(clientRef);
+            clientRef = null;
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
     // --- Static Files ---
     if (path === "/" || path === "/index.html") {
-      return new Response(Bun.file(join(STATIC_DIR, "index.html")));
+      return await serveIndexHtml();
     }
 
     const staticPath = join(STATIC_DIR, path.slice(1));

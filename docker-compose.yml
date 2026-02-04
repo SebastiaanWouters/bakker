@@ -10,7 +10,13 @@ services:
       ENCRYPTION_SECRET: "change-me"
       HOST: "0.0.0.0"
       PORT: "3500"
+      DEV: "1"
+    entrypoint: ["bash", "/app/entrypoint.sh"]
     volumes:
+      - ./server:/app/server
+      - ./scripts:/app/scripts
+      - ./config:/app/config
+      - ./entrypoint.sh:/app/entrypoint.sh:ro
       - bakker-data:/data
     depends_on:
       db:

@@ -5,7 +5,7 @@ CONFIG_FILE="/data/config/config.json"
 DEFAULT_CONFIG="/app/config/default.json"
 LOG_DIR="/data/logs"
 LOG_FILE="$LOG_DIR/backup.log"
-STATUS_FILE="/tmp/backup-status.json"
+STATUS_PATTERN="/tmp/backup-status-*.json"
 
 echo "[entrypoint] Starting DB Backup service..."
 
@@ -21,8 +21,8 @@ fi
 # Initialize log file
 touch "$LOG_FILE"
 
-# Initialize status file
-echo '{"running":false}' > "$STATUS_FILE"
+# Clear any stale status files
+rm -f $STATUS_PATTERN
 
 # Generate crontab from config
 generate_crontab() {
@@ -66,4 +66,8 @@ cron
 
 # Start Bun server in foreground
 echo "[entrypoint] Starting web server on port ${PORT:-3500}..."
-exec bun run /app/server/index.ts
+if [[ "${DEV:-0}" == "1" ]]; then
+    exec bun --watch /app/server/index.ts
+else
+    exec bun run /app/server/index.ts
+fi
