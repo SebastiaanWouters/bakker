@@ -1364,13 +1364,13 @@ async function saveRetention(event) {
 async function loadLogs() {
   const viewer = document.getElementById("log-viewer");
   if (!isAuthReady()) {
-    viewer.textContent = "Enter auth token above to load logs.";
+    viewer.textContent = "Auth token required. Enter it above to load logs.";
     return;
   }
   try {
     const result = await api("/api/logs");
     viewer.textContent = result.text || "No log entries yet.";
-    viewer.scrollTop = viewer.scrollHeight;
+    viewer.scrollTop = 0;
   } catch {
     viewer.textContent = "Could not load logs.";
   }

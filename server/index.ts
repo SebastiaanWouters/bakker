@@ -941,8 +941,15 @@ const server = Bun.serve({
     if (method === "GET" && path === "/api/logs") {
       try {
         const logContent = await readFile(LOG_FILE, "utf-8");
-        const lines = logContent.split("\n");
-        const tail = lines.slice(-200).join("\n");
+        const cleaned = logContent.trimEnd();
+        if (!cleaned) {
+          return new Response("No logs available yet.\n", {
+            headers: { "Content-Type": "text/plain" },
+          });
+        }
+        const lines = cleaned.split("\n");
+        const tailLines = lines.slice(-200).reverse();
+        const tail = `${tailLines.join("\n")}\n`;
         return new Response(tail, {
           headers: { "Content-Type": "text/plain" },
         });
