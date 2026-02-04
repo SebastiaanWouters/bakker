@@ -11,7 +11,8 @@
     <div class="header-title">db/<strong>backup</strong></div>
     <div class="header-right">
       <div id="auth-field" class="auth-field" hidden>
-        <input type="password" id="auth-token" placeholder="Token" autocomplete="off">
+        <input type="password" id="auth-token" placeholder="Auth token" autocomplete="off">
+        <div id="auth-hint" class="auth-hint" hidden>Enter token to load config</div>
       </div>
       <div id="status-indicator" class="status idle">Idle</div>
     </div>
@@ -88,6 +89,7 @@
             <textarea id="db-form-structure" rows="3" placeholder="large_log_table"></textarea>
           </div>
           <div class="form-actions">
+            <button type="button" class="secondary" id="test-connection-btn" onclick="testDatabaseConnection()">Test connection</button>
             <button type="submit">Save database</button>
             <button type="button" class="secondary" onclick="showSaveTemplateModal()">Save as template</button>
             <button type="button" class="secondary" onclick="hideDbForm()">Cancel</button>

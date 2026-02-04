@@ -478,6 +478,49 @@ const server = Bun.serve({
       return json(templates);
     }
 
+    // POST /api/test-connection
+    if (method === "POST" && path === "/api/test-connection") {
+      let body: any;
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      const { db_host, db_port, db_name, db_user, password } = body || {};
+      if (!db_host || !db_name || !db_user || !password) {
+        return json({ error: "Missing required fields: db_host, db_name, db_user, password" }, 400);
+      }
+
+      const port = typeof db_port === "string" && db_port.trim().length > 0 ? db_port.trim() : "3306";
+      const args = [
+        "-h", db_host,
+        "-P", port,
+        "-u", db_user,
+        "-D", db_name,
+        "-e", "SELECT 1;",
+      ];
+
+      try {
+        const result = await new Promise<{ code: number | null }>((resolve, reject) => {
+          const child = spawn("mariadb", args, {
+            stdio: "ignore",
+            env: { ...process.env, MYSQL_PWD: password },
+          });
+          child.on("error", reject);
+          child.on("close", (code) => resolve({ code }));
+        });
+
+        if (result.code !== 0) {
+          return json({ error: "Failed to connect. Check host, user, password, and database name." }, 400);
+        }
+
+        return json({ success: true, message: "Connection successful" });
+      } catch (err: any) {
+        return json({ error: err?.message || "Failed to run connection test" }, 500);
+      }
+    }
+
     // POST /api/templates - create new template
     if (method === "POST" && path === "/api/templates") {
       let body: any;

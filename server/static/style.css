@@ -95,6 +95,13 @@ header {
   gap: var(--space-4);
 }
 
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
 .auth-field input {
   background: transparent;
   color: var(--text);
@@ -115,6 +122,16 @@ header {
 
 .auth-field input::placeholder {
   color: var(--text-tertiary);
+}
+
+.auth-field.auth-required input {
+  border-color: var(--warning);
+}
+
+.auth-hint {
+  font-size: var(--text-xs);
+  color: var(--warning);
+  letter-spacing: 0.02em;
 }
 
 .status {

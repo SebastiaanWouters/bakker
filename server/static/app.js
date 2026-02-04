@@ -244,9 +244,15 @@ function showToast(message, type = "success") {
 
 // --- Auth ---
 
+let authRequired = false;
+
 function getAuthToken() {
   const el = document.getElementById("auth-token");
   return el ? el.value.trim() : "";
+}
+
+function isAuthReady() {
+  return !authRequired || !!getAuthToken();
 }
 
 function persistToken() {
@@ -259,6 +265,37 @@ function restoreToken() {
     const el = document.getElementById("auth-token");
     if (el) el.value = saved;
   }
+}
+
+function setAuthHint(visible, message) {
+  const hint = document.getElementById("auth-hint");
+  if (hint) {
+    if (message) hint.textContent = message;
+    hint.hidden = !visible;
+  }
+  const field = document.getElementById("auth-field");
+  if (field) field.classList.toggle("auth-required", visible);
+}
+
+async function reloadAfterAuth() {
+  await loadConfig();
+  await loadBackups();
+  await loadLogs();
+  await pollStatus();
+}
+
+async function handleAuthTokenUpdate() {
+  persistToken();
+  const token = getAuthToken();
+  if (!token) {
+    if (authRequired) {
+      setAuthHint(true, "Enter token to load config");
+    }
+    return;
+  }
+  setAuthHint(false);
+  showToast("Token saved. Loading config...");
+  await reloadAfterAuth();
 }
 
 // --- Password Management ---
@@ -347,6 +384,9 @@ async function api(path, options = {}) {
 // --- Status polling ---
 
 async function pollStatus() {
+  if (!isAuthReady()) {
+    return null;
+  }
   try {
     const status = await api("/api/status");
     const el = document.getElementById("status-indicator");
@@ -357,8 +397,10 @@ async function pollStatus() {
       el.className = "status idle";
       el.textContent = "Idle";
     }
+    return status;
   } catch {
     // ignore polling errors
+    return null;
   }
 }
 
@@ -366,6 +408,10 @@ async function pollStatus() {
 
 async function loadBackups() {
   const container = document.getElementById("backups-list");
+  if (!isAuthReady()) {
+    container.innerHTML = '<p class="no-backups">Enter auth token above to load backups.</p>';
+    return;
+  }
   try {
     const backups = await api("/api/backups");
     const dbs = Object.keys(backups);
@@ -471,9 +517,8 @@ async function triggerBackup() {
     showToast(`Backup started for ${database}`);
     if (statusPollInterval) clearInterval(statusPollInterval);
     statusPollInterval = setInterval(async () => {
-      await pollStatus();
-      const status = await api("/api/status");
-      if (!status.running) {
+      const status = await pollStatus();
+      if (!status || !status.running) {
         clearInterval(statusPollInterval);
         statusPollInterval = setInterval(pollStatus, 5000);
         loadBackups();
@@ -580,36 +625,110 @@ function parseTextareaList(id) {
     .filter((s) => s.length > 0);
 }
 
-async function saveDatabase(event) {
-  event.preventDefault();
-  if (!currentConfig) return;
-
-  const originalName = document.getElementById("db-form-original-name").value;
-  const name = document.getElementById("db-form-name").value.trim();
-
-  if (!name) {
-    showToast("Config name is required", "error");
-    return;
-  }
-
-  if (!/^[a-zA-Z0-9_]+$/.test(name)) {
-    showToast("Config name: only letters, numbers, and underscores allowed", "error");
-    return;
-  }
-
-  const dbConfig = {
+function getDbFormValues() {
+  return {
+    name: document.getElementById("db-form-name").value.trim(),
     db_host: document.getElementById("db-form-host").value.trim(),
     db_port: document.getElementById("db-form-port").value.trim() || "3306",
     db_name: document.getElementById("db-form-dbname").value.trim(),
     db_user: document.getElementById("db-form-user").value.trim(),
+    password: document.getElementById("db-form-password").value,
     ignored_tables: parseTextareaList("db-form-ignored"),
     structure_only_tables: parseTextareaList("db-form-structure"),
   };
+}
 
-  const password = document.getElementById("db-form-password").value;
+function validateDbForm(values, requirePassword = false) {
+  if (!values.name) {
+    showToast("Config name is required", "error");
+    return false;
+  }
+  if (!/^[a-zA-Z0-9_]+$/.test(values.name)) {
+    showToast("Config name: only letters, numbers, and underscores allowed", "error");
+    return false;
+  }
+  if (!values.db_host || !values.db_name || !values.db_user) {
+    showToast("Host, database name, and user are required.", "error");
+    return false;
+  }
+  if (requirePassword && !values.password) {
+    showToast("Enter the password to test the connection.", "error");
+    return false;
+  }
+  return true;
+}
 
-  const config = { ...currentConfig };
-  config.databases = { ...config.databases };
+async function testDatabaseConnection() {
+  if (authRequired && !getAuthToken()) {
+    showToast("Enter the auth token above to test connection.", "error");
+    return;
+  }
+
+  const values = getDbFormValues();
+  if (!validateDbForm(values, true)) return;
+
+  const button = document.getElementById("test-connection-btn");
+  const originalText = button ? button.textContent : null;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Testing...";
+  }
+
+  try {
+    const result = await api("/api/test-connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        db_host: values.db_host,
+        db_port: values.db_port,
+        db_name: values.db_name,
+        db_user: values.db_user,
+        password: values.password,
+      }),
+    });
+    showToast(result.message || "Connection successful");
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText || "Test connection";
+    }
+  }
+}
+
+async function saveDatabase(event) {
+  event.preventDefault();
+  if (!currentConfig) {
+    if (authRequired && !getAuthToken()) {
+      showToast("Enter the auth token above to load config first.", "error");
+    } else {
+      showToast("Config not loaded yet. Please try again.", "error");
+    }
+    return;
+  }
+
+  const originalName = document.getElementById("db-form-original-name").value;
+  const values = getDbFormValues();
+  if (!validateDbForm(values)) return;
+
+  const name = values.name;
+  const dbConfig = {
+    db_host: values.db_host,
+    db_port: values.db_port,
+    db_name: values.db_name,
+    db_user: values.db_user,
+    ignored_tables: values.ignored_tables,
+    structure_only_tables: values.structure_only_tables,
+  };
+
+  const password = values.password;
+
+  const config = {
+    ...currentConfig,
+    schedules: Array.isArray(currentConfig.schedules) ? [...currentConfig.schedules] : [],
+    databases: { ...currentConfig.databases },
+  };
 
   if (originalName && originalName !== name) {
     delete config.databases[originalName];
@@ -680,50 +799,13 @@ async function deleteDatabase(name) {
 
 // --- Templates ---
 
-async function showTemplatesModal() {
-  const modal = document.getElementById("templates-modal");
-  const list = document.getElementById("templates-list");
-
-  try {
-    const templates = await api("/api/templates");
-    const names = Object.keys(templates);
-
-    if (names.length === 0) {
-      list.innerHTML = '<p class="empty-state">No templates available.</p>';
-    } else {
-      list.innerHTML = names.map((name) => {
-        const t = templates[name];
-        const dbNames = Object.keys(t.databases).join(", ");
-        return `<div class="template-item" onclick="applyTemplate('${name}')">
-          <strong>${name}</strong>
-          <span class="text-muted">${dbNames}</span>
-        </div>`;
-      }).join("");
-    }
-  } catch (err) {
-    list.innerHTML = `<p class="empty-state">Could not load templates: ${err.message}</p>`;
-  }
-
-  modal.hidden = false;
-}
-
-function hideTemplatesModal() {
-  document.getElementById("templates-modal").hidden = true;
-}
-
 let currentPreviewTemplate = null;
 let currentPreviewTemplateName = null;
 
 function showSaveTemplateModal() {
-  const name = document.getElementById("db-form-name").value.trim();
-  const host = document.getElementById("db-form-host").value.trim();
-  
-  if (!name || !host) {
-    showToast("Please fill in at least the config name and host first", "error");
-    return;
-  }
-  
-  document.getElementById("template-name").value = name;
+  const values = getDbFormValues();
+  if (!validateDbForm(values)) return;
+  document.getElementById("template-name").value = values.name;
   document.getElementById("save-template-modal").hidden = false;
 }
 
@@ -733,6 +815,11 @@ function hideSaveTemplateModal() {
 }
 
 async function saveAsTemplate() {
+  if (authRequired && !getAuthToken()) {
+    showToast("Enter the auth token above to save a template.", "error");
+    return;
+  }
+
   const templateName = document.getElementById("template-name").value.trim();
   
   if (!templateName) {
@@ -745,22 +832,25 @@ async function saveAsTemplate() {
     return;
   }
   
+  const values = getDbFormValues();
+  if (!validateDbForm(values)) return;
+  
   const dbConfig = {
-    db_host: document.getElementById("db-form-host").value.trim(),
-    db_port: document.getElementById("db-form-port").value.trim() || "3306",
-    db_name: document.getElementById("db-form-dbname").value.trim(),
-    db_user: document.getElementById("db-form-user").value.trim(),
-    ignored_tables: parseTextareaList("db-form-ignored"),
-    structure_only_tables: parseTextareaList("db-form-structure"),
+    db_host: values.db_host,
+    db_port: values.db_port,
+    db_name: values.db_name,
+    db_user: values.db_user,
+    ignored_tables: values.ignored_tables,
+    structure_only_tables: values.structure_only_tables,
   };
   
   const includeSchedule = document.getElementById("template-include-schedule").checked;
   const schedules = includeSchedule 
-    ? [{ database: document.getElementById("db-form-name").value.trim(), cron: "0 */6 * * *" }]
+    ? [{ database: values.name, cron: "0 */6 * * *" }]
     : [];
   
   const template = {
-    databases: { [document.getElementById("db-form-name").value.trim()]: dbConfig },
+    databases: { [values.name]: dbConfig },
     schedules: schedules,
   };
   
@@ -792,10 +882,10 @@ async function showTemplatesModal() {
       `;
     } else {
       list.innerHTML = names.map((name) => {
-        const t = templates[name];
-        const dbNames = Object.keys(t.databases);
+        const t = templates[name] || {};
+        const dbNames = Object.keys(t.databases || {});
         const dbCount = dbNames.length;
-        const scheduleCount = t.schedules?.length || 0;
+        const scheduleCount = Array.isArray(t.schedules) ? t.schedules.length : 0;
         
         return `<div class="template-card">
           <div class="template-card-header">
@@ -839,7 +929,8 @@ async function previewTemplate(name) {
     const content = document.getElementById("template-preview-content");
     
     let dbHtml = '';
-    for (const [dbName, dbCfg] of Object.entries(template.databases)) {
+    const templateDatabases = template.databases || {};
+    for (const [dbName, dbCfg] of Object.entries(templateDatabases)) {
       const ignored = dbCfg.ignored_tables?.length > 0 ? dbCfg.ignored_tables.join(", ") : "none";
       const structureOnly = dbCfg.structure_only_tables?.length > 0 ? dbCfg.structure_only_tables.join(", ") : "none";
       
@@ -852,8 +943,9 @@ async function previewTemplate(name) {
     }
     
     let scheduleHtml = '';
-    if (template.schedules && template.schedules.length > 0) {
-      scheduleHtml = template.schedules.map(s => {
+    const templateSchedules = Array.isArray(template.schedules) ? template.schedules : [];
+    if (templateSchedules.length > 0) {
+      scheduleHtml = templateSchedules.map(s => {
         const human = cronToHuman(s.cron) || s.cron;
         return `<div class="template-preview-schedule">
           <code>${s.cron}</code>
@@ -867,11 +959,11 @@ async function previewTemplate(name) {
     
     content.innerHTML = `
       <div class="template-preview-section">
-        <h4>Databases (${Object.keys(template.databases).length})</h4>
+        <h4>Databases (${Object.keys(templateDatabases).length})</h4>
         ${dbHtml}
       </div>
       <div class="template-preview-section">
-        <h4>Schedules (${template.schedules?.length || 0})</h4>
+        <h4>Schedules (${templateSchedules.length})</h4>
         ${scheduleHtml}
       </div>
     `;
@@ -896,6 +988,14 @@ async function applyPreviewedTemplate() {
 
 async function applyTemplate(name) {
   try {
+    if (!currentConfig) {
+      if (authRequired && !getAuthToken()) {
+        showToast("Enter the auth token above to load config first.", "error");
+      } else {
+        showToast("Config not loaded yet. Please try again.", "error");
+      }
+      return;
+    }
     const templates = await api("/api/templates");
     const template = templates[name];
     if (!template) {
@@ -903,11 +1003,20 @@ async function applyTemplate(name) {
       return;
     }
 
-    const config = { ...currentConfig };
-    config.databases = { ...config.databases, ...template.databases };
+    if (!template.databases || typeof template.databases !== "object") {
+      showToast("Template is missing database definitions.", "error");
+      return;
+    }
+
+    const config = {
+      ...currentConfig,
+      schedules: Array.isArray(currentConfig.schedules) ? [...currentConfig.schedules] : [],
+      databases: { ...currentConfig.databases, ...template.databases },
+    };
 
     const existingScheduleKeys = new Set(config.schedules.map((s) => `${s.database}:${s.cron}`));
-    for (const schedule of template.schedules) {
+    const templateSchedules = Array.isArray(template.schedules) ? template.schedules : [];
+    for (const schedule of templateSchedules) {
       const key = `${schedule.database}:${schedule.cron}`;
       if (!existingScheduleKeys.has(key)) {
         config.schedules = [...config.schedules, schedule];
@@ -1026,7 +1135,14 @@ async function deleteSchedule(index) {
 
 async function saveRetention(event) {
   event.preventDefault();
-  if (!currentConfig) return;
+  if (!currentConfig) {
+    if (authRequired && !getAuthToken()) {
+      showToast("Enter the auth token above to load config first.", "error");
+    } else {
+      showToast("Config not loaded yet. Please try again.", "error");
+    }
+    return;
+  }
 
   const retention = parseInt(document.getElementById("retention").value, 10) || 5;
   const config = { ...currentConfig, retention };
@@ -1048,6 +1164,10 @@ async function saveRetention(event) {
 
 async function loadLogs() {
   const viewer = document.getElementById("log-viewer");
+  if (!isAuthReady()) {
+    viewer.textContent = "Enter auth token above to load logs.";
+    return;
+  }
   try {
     const result = await api("/api/logs");
     viewer.textContent = result.text || "No log entries yet.";
@@ -1060,6 +1180,10 @@ async function loadLogs() {
 // --- Init ---
 
 async function loadConfig() {
+  if (!isAuthReady()) {
+    setAuthHint(true, "Enter token to load config");
+    return;
+  }
   try {
     currentConfig = await api("/api/config");
     document.getElementById("retention").value = currentConfig.retention || 5;
@@ -1067,8 +1191,14 @@ async function loadConfig() {
     renderDbCards();
     populateTriggerSelect();
     renderSchedules();
+    setAuthHint(false);
   } catch (err) {
-    showToast("Could not load config: " + err.message, "error");
+    if (authRequired && err.message === "Unauthorized") {
+      setAuthHint(true, "Enter token to load config");
+      showToast("Auth token required. Enter it above to load config.", "error");
+    } else {
+      showToast("Could not load config: " + err.message, "error");
+    }
   }
 }
 
@@ -1077,9 +1207,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     const res = await fetch("/api/auth-required");
     const data = await res.json();
     if (data.required) {
+      authRequired = true;
       document.getElementById("auth-field").hidden = false;
       restoreToken();
-      document.getElementById("auth-token").addEventListener("change", persistToken);
+      const tokenInput = document.getElementById("auth-token");
+      if (tokenInput) {
+        tokenInput.addEventListener("change", handleAuthTokenUpdate);
+        tokenInput.addEventListener("input", () => {
+          if (!tokenInput.value.trim()) {
+            setAuthHint(true, "Enter token to load config");
+          }
+        });
+        tokenInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            handleAuthTokenUpdate();
+          }
+        });
+      }
+      if (!getAuthToken()) {
+        setAuthHint(true, "Enter token to load config");
+      }
     }
     // Check if decryption failed (shown in auth-required response)
     if (data.decryptionFailed) {
