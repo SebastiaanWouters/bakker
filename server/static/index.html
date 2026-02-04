@@ -1,209 +1,358 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>bakker</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <header>
-    <div class="header-title">bakker</div>
-    <div class="header-right">
-      <div id="auth-field" class="auth-field" hidden>
-        <input type="password" id="auth-token" placeholder="Auth token" autocomplete="off">
-      </div>
-      <div id="status-indicator" class="status idle">Idle</div>
-    </div>
-  </header>
-
-  <main>
-    <div id="password-warning" class="warning-banner" hidden>
-      <span><strong>Warning:</strong> Stored passwords could not be decrypted. Please re-enter database passwords.</span>
-      <button class="small" onclick="hidePasswordWarning()">Dismiss</button>
-    </div>
-
-    <section id="trigger-section">
-      <h2>Run backup</h2>
-      <p class="text-muted">Parallel-safe. Multiple databases can run at once.</p>
-      <div class="trigger-controls">
-        <select id="trigger-db">
-          <option value="">No databases configured</option>
-        </select>
-        <button id="trigger-btn" onclick="triggerBackup()">Back up now</button>
-      </div>
-      <div id="running-list" class="running-list"></div>
-    </section>
-
-    <section id="backups-section">
-      <h2>Backups</h2>
-      <div class="backups-controls">
-        <div class="backups-search">
-          <label for="backups-search-input">Filter</label>
-          <input type="text" id="backups-search-input" placeholder="Search database or filename">
-        </div>
-      </div>
-      <div id="backups-list">
-        <p class="loading">Loading backups...</p>
-      </div>
-    </section>
-
-    <section id="databases-section">
-      <h2>Databases</h2>
-      <div id="db-cards"></div>
-      <div class="add-controls">
-        <button onclick="showAddDbForm()">Add database</button>
-        <button class="secondary" onclick="showTemplatesModal()">Use template</button>
-      </div>
-      <div id="db-form-container" hidden>
-        <form id="db-form" onsubmit="saveDatabase(event)">
-          <input type="hidden" id="db-form-original-name" value="">
-          <div class="form-row">
-            <label for="db-form-name">Config name</label>
-            <input type="text" id="db-form-name" placeholder="my_database" required>
-          </div>
-          <div class="form-row">
-            <label for="db-form-host">Host</label>
-            <input type="text" id="db-form-host" placeholder="db.example.com" required>
-          </div>
-          <div class="form-row">
-            <label for="db-form-port">Port</label>
-            <input type="text" id="db-form-port" placeholder="3306" value="3306">
-          </div>
-          <div class="form-row">
-            <label for="db-form-dbname">Database name</label>
-            <input type="text" id="db-form-dbname" placeholder="my_database" required>
-          </div>
-          <div class="form-row">
-            <label for="db-form-user">User</label>
-            <input type="text" id="db-form-user" placeholder="db_user" required>
-          </div>
-          <div class="form-row">
-            <label for="db-form-password">Password</label>
-            <div class="password-row">
-              <input type="password" id="db-form-password" placeholder="password" autocomplete="off">
-              <button type="button" class="small secondary password-toggle" onclick="togglePasswordVisibility()" title="Show/hide password">
-                <span id="password-toggle-text">Show</span>
-              </button>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>bakker test</title>
+        <link rel="stylesheet" href="/style.css" />
+    </head>
+    <body>
+        <header>
+            <div class="header-title">bakker</div>
+            <div class="header-right">
+                <div id="auth-field" class="auth-field" hidden>
+                    <input
+                        type="password"
+                        id="auth-token"
+                        placeholder="Auth token"
+                        autocomplete="off"
+                    />
+                </div>
+                <div id="status-indicator" class="status idle">Idle</div>
             </div>
-          </div>
-          <div class="form-row">
-            <label for="db-form-ignored">Ignored tables <span class="text-muted">(one per line, completely excluded)</span></label>
-            <textarea id="db-form-ignored" rows="3" placeholder="table_to_skip"></textarea>
-          </div>
-          <div class="form-row">
-            <label for="db-form-structure">Structure-only tables <span class="text-muted">(one per line, schema dumped without data)</span></label>
-            <textarea id="db-form-structure" rows="3" placeholder="large_log_table"></textarea>
-          </div>
-          <div class="form-actions">
-            <button type="button" class="secondary" id="test-connection-btn" onclick="testDatabaseConnection()">Test connection</button>
-            <button type="submit">Save database</button>
-            <button type="button" class="secondary" onclick="showSaveTemplateModal()">Save as template</button>
-            <button type="button" class="secondary" onclick="hideDbForm()">Cancel</button>
-          </div>
-        </form>
-      </div>
-    </section>
+        </header>
 
-    <section id="schedules-section">
-      <h2>Schedules</h2>
-      <p class="text-muted">Scheduled backups run inside the container as <code>root</code>.</p>
-      <table class="backup-table" id="schedules-table">
-        <thead><tr><th>Database</th><th>Cron</th><th>When</th><th></th></tr></thead>
-        <tbody id="schedules-body"></tbody>
-      </table>
-      <div class="schedule-add-row" id="add-schedule-controls">
-        <select id="schedule-db-select">
-          <option value="">Database</option>
-        </select>
-        <input type="text" id="schedule-cron-input" placeholder="0 */6 * * *" oninput="updateScheduleCronPreview()">
-        <button onclick="addSchedule()">Add</button>
-        <span id="schedule-cron-preview" class="cron-preview"></span>
-      </div>
-    </section>
+        <main>
+            <div id="password-warning" class="warning-banner" hidden>
+                <span
+                    ><strong>Warning:</strong> Stored passwords could not be
+                    decrypted. Please re-enter database passwords.</span
+                >
+                <button class="small" onclick="hidePasswordWarning()">
+                    Dismiss
+                </button>
+            </div>
 
-    <section id="retention-section">
-      <h2>Retention</h2>
-      <form onsubmit="saveRetention(event)">
-        <div class="form-group">
-          <label for="retention">Backups kept per database</label>
-          <input type="number" id="retention" min="1" max="100" placeholder="5">
+            <section id="trigger-section">
+                <h2>Run backup</h2>
+                <p class="text-muted">
+                    Parallel-safe. Multiple databases can run at once.
+                </p>
+                <div class="trigger-controls">
+                    <select id="trigger-db">
+                        <option value="">No databases configured</option>
+                    </select>
+                    <button id="trigger-btn" onclick="triggerBackup()">
+                        Back up now
+                    </button>
+                </div>
+                <div id="running-list" class="running-list"></div>
+            </section>
+
+            <section id="backups-section">
+                <h2>Backups</h2>
+                <div id="backups-list">
+                    <p class="loading">Loading backups...</p>
+                </div>
+            </section>
+
+            <section id="databases-section">
+                <h2>Databases</h2>
+                <div id="db-cards"></div>
+                <div class="add-controls">
+                    <button onclick="showAddDbForm()">Add database</button>
+                    <button class="secondary" onclick="showTemplatesModal()">
+                        Use template
+                    </button>
+                </div>
+                <div id="db-form-container" hidden>
+                    <form id="db-form" onsubmit="saveDatabase(event)">
+                        <input
+                            type="hidden"
+                            id="db-form-original-name"
+                            value=""
+                        />
+                        <div class="form-row">
+                            <label for="db-form-name">Config name</label>
+                            <input
+                                type="text"
+                                id="db-form-name"
+                                placeholder="my_database"
+                                required
+                            />
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-host">Host</label>
+                            <input
+                                type="text"
+                                id="db-form-host"
+                                placeholder="db.example.com"
+                                required
+                            />
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-port">Port</label>
+                            <input
+                                type="text"
+                                id="db-form-port"
+                                placeholder="3306"
+                                value="3306"
+                            />
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-dbname">Database name</label>
+                            <input
+                                type="text"
+                                id="db-form-dbname"
+                                placeholder="my_database"
+                                required
+                            />
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-user">User</label>
+                            <input
+                                type="text"
+                                id="db-form-user"
+                                placeholder="db_user"
+                                required
+                            />
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-password">Password</label>
+                            <div class="password-row">
+                                <input
+                                    type="password"
+                                    id="db-form-password"
+                                    placeholder="password"
+                                    autocomplete="off"
+                                />
+                                <button
+                                    type="button"
+                                    class="small secondary password-toggle"
+                                    onclick="togglePasswordVisibility()"
+                                    title="Show/hide password"
+                                >
+                                    <span id="password-toggle-text">Show</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-ignored"
+                                >Ignored tables
+                                <span class="text-muted"
+                                    >(one per line, completely excluded)</span
+                                ></label
+                            >
+                            <textarea
+                                id="db-form-ignored"
+                                rows="3"
+                                placeholder="table_to_skip"
+                            ></textarea>
+                        </div>
+                        <div class="form-row">
+                            <label for="db-form-structure"
+                                >Structure-only tables
+                                <span class="text-muted"
+                                    >(one per line, schema dumped without
+                                    data)</span
+                                ></label
+                            >
+                            <textarea
+                                id="db-form-structure"
+                                rows="3"
+                                placeholder="large_log_table"
+                            ></textarea>
+                        </div>
+                        <div class="form-actions">
+                            <button
+                                type="button"
+                                class="secondary"
+                                id="test-connection-btn"
+                                onclick="testDatabaseConnection()"
+                            >
+                                Test connection
+                            </button>
+                            <button type="submit">Save database</button>
+                            <button
+                                type="button"
+                                class="secondary"
+                                onclick="showSaveTemplateModal()"
+                            >
+                                Save as template
+                            </button>
+                            <button
+                                type="button"
+                                class="secondary"
+                                onclick="hideDbForm()"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <section id="schedules-section">
+                <h2>Schedules</h2>
+                <p class="text-muted">
+                    Scheduled backups run inside the container as
+                    <code>root</code>.
+                </p>
+                <table class="backup-table" id="schedules-table">
+                    <thead>
+                        <tr>
+                            <th>Database</th>
+                            <th>Cron</th>
+                            <th>When</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedules-body"></tbody>
+                </table>
+                <div class="schedule-add-row" id="add-schedule-controls">
+                    <select id="schedule-db-select">
+                        <option value="">Database</option>
+                    </select>
+                    <input
+                        type="text"
+                        id="schedule-cron-input"
+                        placeholder="0 */6 * * *"
+                        oninput="updateScheduleCronPreview()"
+                    />
+                    <button onclick="addSchedule()">Add</button>
+                    <span
+                        id="schedule-cron-preview"
+                        class="cron-preview"
+                    ></span>
+                </div>
+            </section>
+
+            <section id="retention-section">
+                <h2>Retention</h2>
+                <form onsubmit="saveRetention(event)">
+                    <div class="form-group">
+                        <label for="retention">Backups kept per database</label>
+                        <input
+                            type="number"
+                            id="retention"
+                            min="1"
+                            max="100"
+                            placeholder="5"
+                        />
+                    </div>
+                    <button type="submit">Save</button>
+                </form>
+            </section>
+
+            <section id="logs-section">
+                <h2>Logs</h2>
+                <div class="log-controls">
+                    <button class="secondary" onclick="loadLogs()">
+                        Refresh logs
+                    </button>
+                </div>
+                <pre id="log-viewer">Loading...</pre>
+            </section>
+        </main>
+
+        <div id="templates-modal" class="modal" hidden>
+            <div class="modal-content modal-wide">
+                <h3>Templates</h3>
+                <div id="templates-list"></div>
+                <div class="modal-footer">
+                    <button class="secondary" onclick="hideTemplatesModal()">
+                        Close
+                    </button>
+                </div>
+            </div>
         </div>
-        <button type="submit">Save</button>
-      </form>
-    </section>
 
-    <section id="logs-section">
-      <h2>Logs</h2>
-      <div class="log-controls">
-        <button class="secondary" onclick="loadLogs()">Refresh logs</button>
-      </div>
-      <pre id="log-viewer">Loading...</pre>
-    </section>
-  </main>
+        <div id="save-template-modal" class="modal" hidden>
+            <div class="modal-content">
+                <h3>Save as Template</h3>
+                <p class="text-muted">
+                    Save the current database configuration as a reusable
+                    template.
+                </p>
+                <div class="form-row">
+                    <label for="template-name">Template name</label>
+                    <input
+                        type="text"
+                        id="template-name"
+                        placeholder="my_template"
+                        required
+                    />
+                    <span class="text-muted small"
+                        >Only letters, numbers, and underscores allowed</span
+                    >
+                </div>
+                <div class="form-row">
+                    <label>
+                        <input
+                            type="checkbox"
+                            id="template-include-schedule"
+                            checked
+                        />
+                        Include schedule (0 */6 * * *)
+                    </label>
+                </div>
+                <div class="modal-footer">
+                    <button onclick="saveAsTemplate()">Save Template</button>
+                    <button class="secondary" onclick="hideSaveTemplateModal()">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
 
-  <div id="templates-modal" class="modal" hidden>
-    <div class="modal-content modal-wide">
-      <h3>Templates</h3>
-      <div id="templates-list"></div>
-      <div class="modal-footer">
-        <button class="secondary" onclick="hideTemplatesModal()">Close</button>
-      </div>
-    </div>
-  </div>
+        <div id="template-preview-modal" class="modal" hidden>
+            <div class="modal-content modal-wide">
+                <h3>Template Preview</h3>
+                <div id="template-preview-content"></div>
+                <div class="modal-footer">
+                    <button
+                        id="template-preview-apply-btn"
+                        onclick="applyPreviewedTemplate()"
+                    >
+                        Apply Template
+                    </button>
+                    <button
+                        class="secondary"
+                        onclick="hideTemplatePreviewModal()"
+                    >
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
 
-  <div id="save-template-modal" class="modal" hidden>
-    <div class="modal-content">
-      <h3>Save as Template</h3>
-      <p class="text-muted">Save the current database configuration as a reusable template.</p>
-      <div class="form-row">
-        <label for="template-name">Template name</label>
-        <input type="text" id="template-name" placeholder="my_template" required>
-        <span class="text-muted small">Only letters, numbers, and underscores allowed</span>
-      </div>
-      <div class="form-row">
-        <label>
-          <input type="checkbox" id="template-include-schedule" checked>
-          Include schedule (0 */6 * * *)
-        </label>
-      </div>
-      <div class="modal-footer">
-        <button onclick="saveAsTemplate()">Save Template</button>
-        <button class="secondary" onclick="hideSaveTemplateModal()">Cancel</button>
-      </div>
-    </div>
-  </div>
+        <div id="template-edit-modal" class="modal" hidden>
+            <div class="modal-content modal-wide">
+                <h3>Edit Template</h3>
+                <p class="text-muted">
+                    Update the template JSON. Keep it simple and valid.
+                </p>
+                <div class="form-row">
+                    <label for="template-edit-name">Template name</label>
+                    <input type="text" id="template-edit-name" disabled />
+                </div>
+                <div class="form-row">
+                    <label for="template-edit-json">Template JSON</label>
+                    <textarea
+                        id="template-edit-json"
+                        rows="12"
+                        spellcheck="false"
+                    ></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button onclick="saveEditedTemplate()">Save changes</button>
+                    <button class="secondary" onclick="hideTemplateEditModal()">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
 
-  <div id="template-preview-modal" class="modal" hidden>
-    <div class="modal-content modal-wide">
-      <h3>Template Preview</h3>
-      <div id="template-preview-content"></div>
-      <div class="modal-footer">
-        <button id="template-preview-apply-btn" onclick="applyPreviewedTemplate()">Apply Template</button>
-        <button class="secondary" onclick="hideTemplatePreviewModal()">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="template-edit-modal" class="modal" hidden>
-    <div class="modal-content modal-wide">
-      <h3>Edit Template</h3>
-      <p class="text-muted">Update the template JSON. Keep it simple and valid.</p>
-      <div class="form-row">
-        <label for="template-edit-name">Template name</label>
-        <input type="text" id="template-edit-name" disabled>
-      </div>
-      <div class="form-row">
-        <label for="template-edit-json">Template JSON</label>
-        <textarea id="template-edit-json" rows="12" spellcheck="false"></textarea>
-      </div>
-      <div class="modal-footer">
-        <button onclick="saveEditedTemplate()">Save changes</button>
-        <button class="secondary" onclick="hideTemplateEditModal()">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="/app.js"></script>
-</body>
+        <script src="/app.js"></script>
+    </body>
 </html>

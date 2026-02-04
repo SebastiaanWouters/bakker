@@ -7,7 +7,6 @@ let runningDatabases = new Set();
 let lastRunningCount = 0;
 let backupsCache = {};
 let backupsView = {
-  query: "",
   limitPerDb: 5,
   expanded: new Set(),
 };
@@ -23,21 +22,62 @@ const CRON_RANGES = [
 ];
 
 const MONTH_NAMES_MAP = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
 };
 
 const DOW_NAMES_MAP = {
-  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
 };
 
-const DOW_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const MONTH_LABELS = ["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const DOW_LABELS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+const MONTH_LABELS = [
+  "",
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
 
 function resolveAlias(val, fieldIndex) {
   const lower = val.toLowerCase();
-  if (fieldIndex === 3 && MONTH_NAMES_MAP[lower] !== undefined) return MONTH_NAMES_MAP[lower];
-  if (fieldIndex === 4 && DOW_NAMES_MAP[lower] !== undefined) return DOW_NAMES_MAP[lower];
+  if (fieldIndex === 3 && MONTH_NAMES_MAP[lower] !== undefined)
+    return MONTH_NAMES_MAP[lower];
+  if (fieldIndex === 4 && DOW_NAMES_MAP[lower] !== undefined)
+    return DOW_NAMES_MAP[lower];
   const n = parseInt(val, 10);
   return isNaN(n) ? null : n;
 }
@@ -52,21 +92,30 @@ function validateCronField(field, range, fieldIndex) {
     if (stepParts.length > 2) return `Invalid step in ${range.name}: "${part}"`;
     if (stepParts.length === 2) {
       const step = parseInt(stepParts[1], 10);
-      if (isNaN(step) || step < 1) return `Invalid step value "${stepParts[1]}" in ${range.name}`;
-      if (step > fieldSpan) return `Step ${step} exceeds range of ${range.name} (max ${fieldSpan})`;
+      if (isNaN(step) || step < 1)
+        return `Invalid step value "${stepParts[1]}" in ${range.name}`;
+      if (step > fieldSpan)
+        return `Step ${step} exceeds range of ${range.name} (max ${fieldSpan})`;
     }
     const base = stepParts[0];
     if (base === "*") continue;
     const rangeParts = base.split("-");
-    if (rangeParts.length > 2) return `Invalid range in ${range.name}: "${base}"`;
+    if (rangeParts.length > 2)
+      return `Invalid range in ${range.name}: "${base}"`;
     const resolved = [];
     for (const val of rangeParts) {
       const n = resolveAlias(val, fieldIndex);
       if (n === null) {
-        const hint = fieldIndex === 3 ? " (use 1-12 or JAN-DEC)" : fieldIndex === 4 ? " (use 0-7 or SUN-SAT)" : "";
+        const hint =
+          fieldIndex === 3
+            ? " (use 1-12 or JAN-DEC)"
+            : fieldIndex === 4
+              ? " (use 0-7 or SUN-SAT)"
+              : "";
         return `"${val}" is not valid in ${range.name}${hint}`;
       }
-      if (n < range.min || n > range.max) return `${n} is out of range ${range.min}-${range.max} for ${range.name}`;
+      if (n < range.min || n > range.max)
+        return `${n} is out of range ${range.min}-${range.max} for ${range.name}`;
       resolved.push(n);
     }
     if (resolved.length === 2 && resolved[0] > resolved[1]) {
@@ -98,11 +147,20 @@ function expandField(field, min, max) {
       for (let i = min; i <= max; i += step) results.add(i);
     } else if (base.includes("-")) {
       const [loRaw, hiRaw] = base.split("-");
-      const lo = resolveAlias(loRaw, min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1) ?? parseInt(loRaw, 10);
-      const hi = resolveAlias(hiRaw, min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1) ?? parseInt(hiRaw, 10);
+      const lo =
+        resolveAlias(
+          loRaw,
+          min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1,
+        ) ?? parseInt(loRaw, 10);
+      const hi =
+        resolveAlias(
+          hiRaw,
+          min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1,
+        ) ?? parseInt(hiRaw, 10);
       for (let i = lo; i <= hi; i += step) results.add(i);
     } else {
-      const aliasIdx = min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1;
+      const aliasIdx =
+        min === 1 && max === 12 ? 3 : min === 0 && max === 6 ? 4 : -1;
       const resolved = aliasIdx === -1 ? null : resolveAlias(base, aliasIdx);
       results.add(resolved ?? parseInt(base, 10));
     }
@@ -120,8 +178,10 @@ function describeDow(field) {
   if (field === "*") return null;
   const values = expandField(field, 0, 6);
   if (!values) return field;
-  if (values.length === 5 && values[0] === 1 && values[4] === 5) return "weekdays";
-  if (values.length === 2 && values[0] === 0 && values[1] === 6) return "weekends";
+  if (values.length === 5 && values[0] === 1 && values[4] === 5)
+    return "weekdays";
+  if (values.length === 2 && values[0] === 0 && values[1] === 6)
+    return "weekends";
   return values.map((d) => DOW_LABELS[d % 7]).join(", ");
 }
 
@@ -267,6 +327,8 @@ function formatBytes(bytes) {
 let authRequired = false;
 let lastAuthToastMessage = "";
 let lastAuthToastAt = 0;
+let authUpdateTimer = null;
+let lastAuthToken = "";
 
 function getAuthToken() {
   const el = document.getElementById("auth-token");
@@ -302,25 +364,50 @@ function setAuthHint(visible, message) {
   if (field) field.classList.toggle("auth-required", visible);
 }
 
-async function reloadAfterAuth() {
-  await loadConfig();
-  await loadBackups();
-  await loadLogs();
-  await pollStatus();
-}
-
-async function handleAuthTokenUpdate() {
+function scheduleAuthTokenUpdate() {
   persistToken();
   const token = getAuthToken();
   if (!token) {
     if (authRequired) {
-      setAuthHint(true, "Enter token to load config");
+      setAuthHint(true, "Auth token missing. Enter it to load configuration.");
     }
+    lastAuthToken = "";
     return;
   }
   setAuthHint(false);
-  showToast("Token saved. Loading config...");
-  await reloadAfterAuth();
+  if (token === lastAuthToken) return;
+  if (authUpdateTimer) clearTimeout(authUpdateTimer);
+  authUpdateTimer = setTimeout(() => handleAuthTokenUpdate(token), 400);
+}
+
+async function handleAuthTokenUpdate(expectedToken) {
+  persistToken();
+  const token = expectedToken ?? getAuthToken();
+  if (!token) {
+    if (authRequired) {
+      setAuthHint(true, "Auth token missing. Enter it to load configuration.");
+    }
+    lastAuthToken = "";
+    return;
+  }
+  setAuthHint(false);
+  try {
+    await loadConfig({
+      throwOnUnauthorized: true,
+      invalidAuthMessage: "Auth token invalid. Please re-enter.",
+    });
+    await loadBackups();
+    await loadLogs();
+    await pollStatus();
+    lastAuthToken = token;
+    showToast("Auth token valid. Data loaded.");
+  } catch (err) {
+    if (authRequired && err.message === "Unauthorized") {
+      setAuthHint(true, "Auth token invalid. Please re-enter.");
+    } else {
+      showToast("Could not load data: " + err.message, "error");
+    }
+  }
 }
 
 // --- Password Management ---
@@ -330,7 +417,7 @@ let passwordConfigs = [];
 function togglePasswordVisibility() {
   const input = document.getElementById("db-form-password");
   const toggleText = document.getElementById("password-toggle-text");
-  
+
   if (input.type === "password") {
     input.type = "text";
     toggleText.textContent = "Hide";
@@ -368,11 +455,11 @@ async function loadPasswordStatus() {
   try {
     const status = await api("/api/passwords");
     passwordConfigs = status.configs || [];
-    
+
     if (status.decryptionFailed) {
       document.getElementById("password-warning").hidden = false;
     }
-    
+
     return passwordConfigs;
   } catch (err) {
     console.error("Failed to load password status:", err);
@@ -423,8 +510,11 @@ function updateRunningIndicators(databases) {
     if (databases.length === 0) {
       list.innerHTML = '<span class="text-muted">No backups running.</span>';
     } else {
-      list.innerHTML = `<span class="text-muted">Running now:</span>` +
-        databases.map((db) => `<span class="running-chip">${db}</span>`).join("");
+      list.innerHTML =
+        `<span class="text-muted">Running now:</span>` +
+        databases
+          .map((db) => `<span class="running-chip">${db}</span>`)
+          .join("");
     }
   }
 
@@ -451,12 +541,17 @@ async function pollStatus() {
   try {
     const status = await api("/api/status");
     const el = document.getElementById("status-indicator");
-    const databases = Array.isArray(status.databases) ? status.databases : (status.database ? [status.database] : []);
+    const databases = Array.isArray(status.databases)
+      ? status.databases
+      : status.database
+        ? [status.database]
+        : [];
     if (databases.length > 0) {
       el.className = "status running";
-      el.textContent = databases.length === 1
-        ? `Running ${databases[0]}`
-        : `${databases.length} running`;
+      el.textContent =
+        databases.length === 1
+          ? `Running ${databases[0]}`
+          : `${databases.length} running`;
     } else {
       el.className = "status idle";
       el.textContent = "Idle";
@@ -480,7 +575,8 @@ async function pollStatus() {
 async function loadBackups() {
   const container = document.getElementById("backups-list");
   if (!isAuthReady()) {
-    container.innerHTML = '<p class="no-backups">Enter auth token above to load backups.</p>';
+    container.innerHTML =
+      '<p class="no-backups">Auth token required. Enter it above to load backups.</p>';
     return;
   }
   try {
@@ -491,43 +587,32 @@ async function loadBackups() {
   }
 }
 
-function setBackupsViewFromControls() {
-  const input = document.getElementById("backups-search-input");
-  backupsView.query = input ? input.value.trim().toLowerCase() : "";
-}
-
 function renderBackups() {
   const container = document.getElementById("backups-list");
   if (!container) return;
 
   const dbs = Object.keys(backupsCache || {});
   if (dbs.length === 0) {
-    container.innerHTML = '<p class="no-backups">No backups yet. Configure a database and trigger your first backup.</p>';
+    container.innerHTML =
+      '<p class="no-backups">No backups yet. Configure a database and trigger your first backup.</p>';
     return;
   }
-
-  setBackupsViewFromControls();
 
   let html = "";
-  const filteredDbs = dbs.sort().filter((db) => {
-    if (!backupsView.query) return true;
-    return db.toLowerCase().includes(backupsView.query);
-  });
-
-  if (filteredDbs.length === 0) {
-    container.innerHTML = '<p class="no-backups">No backups match the current filters.</p>';
-    return;
-  }
+  const filteredDbs = dbs.sort();
 
   for (const db of filteredDbs) {
     const list = backupsCache[db] || [];
-    const runningBadge = runningDatabases.has(db) ? '<span class="run-badge inline">Running</span>' : '';
+    const runningBadge = runningDatabases.has(db)
+      ? '<span class="run-badge inline">Running</span>'
+      : "";
     const expanded = backupsView.expanded.has(db);
-    const inProgressFilename = runningDatabases.has(db) && list.length > 0 ? list[0].filename : null;
-    const filteredList = backupsView.query
-      ? list.filter((b) => b.filename.toLowerCase().includes(backupsView.query) || b.date.toLowerCase().includes(backupsView.query))
-      : list;
-    const visibleList = expanded ? filteredList : filteredList.slice(0, backupsView.limitPerDb);
+    const inProgressFilename =
+      runningDatabases.has(db) && list.length > 0 ? list[0].filename : null;
+    const filteredList = list;
+    const visibleList = expanded
+      ? filteredList
+      : filteredList.slice(0, backupsView.limitPerDb);
     html += `<div class="env-group">
       <div class="env-group-header">
         <h3>${db} ${runningBadge}</h3>
@@ -538,9 +623,14 @@ function renderBackups() {
         <tbody>`;
 
     for (const b of visibleList) {
-      const isInProgress = inProgressFilename && b.filename === inProgressFilename;
-      const downloadDisabled = isInProgress ? "disabled aria-disabled=\"true\" data-in-progress=\"true\" title=\"Backup still running\"" : "";
-      const inProgressTag = isInProgress ? '<span class="progress-tag">In progress</span>' : "";
+      const isInProgress =
+        inProgressFilename && b.filename === inProgressFilename;
+      const downloadDisabled = isInProgress
+        ? 'disabled aria-disabled="true" data-in-progress="true" title="Backup still running"'
+        : "";
+      const inProgressTag = isInProgress
+        ? '<span class="progress-tag">In progress</span>'
+        : "";
       html += `<tr class="${isInProgress ? "in-progress" : ""}">
         <td>${b.date}</td>
         <td>${b.sizeHuman || `${b.sizeMB} MB`}</td>
@@ -572,7 +662,10 @@ function renderBackups() {
   container.querySelectorAll("[data-download-file]").forEach((btn) => {
     btn.addEventListener("click", () => {
       if (btn.dataset.inProgress === "true") {
-        showToast("Backup still in progress. Download is disabled until it completes.", "error");
+        showToast(
+          "Backup still in progress. Download is disabled until it completes.",
+          "error",
+        );
         return;
       }
       downloadBackup(decodeURIComponent(btn.dataset.downloadFile));
@@ -601,7 +694,10 @@ async function downloadBackup(filename) {
   try {
     const token = getAuthToken();
     if (authRequired && !token) {
-      showToast("Enter the auth token above to download backups.", "error");
+      showToast(
+        "Auth token missing. Enter it above to download backups.",
+        "error",
+      );
       return;
     }
 
@@ -621,7 +717,9 @@ async function downloadBackup(filename) {
 async function deleteBackup(filename) {
   if (!confirm(`Delete "${filename}"?`)) return;
   try {
-    await api(`/api/backups/${encodeURIComponent(filename)}`, { method: "DELETE" });
+    await api(`/api/backups/${encodeURIComponent(filename)}`, {
+      method: "DELETE",
+    });
     showToast("Backup deleted");
     loadBackups();
   } catch (err) {
@@ -666,11 +764,13 @@ function populateTriggerSelect() {
   const scheduleSelect = document.getElementById("schedule-db-select");
   const dbs = Object.keys(currentConfig.databases || {});
 
-  select.innerHTML = dbs.length === 0
-    ? '<option value="">No databases configured</option>'
-    : dbs.map((db) => `<option value="${db}">${db}</option>`).join("");
+  select.innerHTML =
+    dbs.length === 0
+      ? '<option value="">No databases configured</option>'
+      : dbs.map((db) => `<option value="${db}">${db}</option>`).join("");
 
-  scheduleSelect.innerHTML = '<option value="">Database</option>' +
+  scheduleSelect.innerHTML =
+    '<option value="">Database</option>' +
     dbs.map((db) => `<option value="${db}">${db}</option>`).join("");
 }
 
@@ -679,14 +779,15 @@ function renderDbCards() {
   const dbs = Object.entries(currentConfig.databases || {});
 
   if (dbs.length === 0) {
-    container.innerHTML = '<p class="empty-state">No databases configured yet.<br>Add one manually or pick a template to get started.</p>';
+    container.innerHTML =
+      '<p class="empty-state">No databases configured yet.<br>Add one manually or pick a template to get started.</p>';
     return;
   }
 
   let html = "";
   for (const [name, cfg] of dbs) {
     const hasPass = hasPassword(name);
-    const passStatus = hasPass 
+    const passStatus = hasPass
       ? '<span class="password-status locked">Password set</span>'
       : '<span class="password-status unlocked">No password</span>';
     const running = runningDatabases.has(name);
@@ -745,14 +846,19 @@ function editDatabase(name) {
   document.getElementById("db-form-password").value = "";
   document.getElementById("db-form-password").type = "password";
   document.getElementById("password-toggle-text").textContent = "Show";
-  document.getElementById("db-form-ignored").value = (cfg.ignored_tables || []).join("\n");
-  document.getElementById("db-form-structure").value = (cfg.structure_only_tables || []).join("\n");
+  document.getElementById("db-form-ignored").value = (
+    cfg.ignored_tables || []
+  ).join("\n");
+  document.getElementById("db-form-structure").value = (
+    cfg.structure_only_tables || []
+  ).join("\n");
   document.getElementById("db-form-container").hidden = false;
 }
 
 function parseTextareaList(id) {
-  return document.getElementById(id).value
-    .split("\n")
+  return document
+    .getElementById(id)
+    .value.split("\n")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
@@ -776,7 +882,10 @@ function validateDbForm(values, requirePassword = false) {
     return false;
   }
   if (!/^[a-zA-Z0-9_]+$/.test(values.name)) {
-    showToast("Config name: only letters, numbers, and underscores allowed", "error");
+    showToast(
+      "Config name: only letters, numbers, and underscores allowed",
+      "error",
+    );
     return false;
   }
   if (!values.db_host || !values.db_name || !values.db_user) {
@@ -792,7 +901,10 @@ function validateDbForm(values, requirePassword = false) {
 
 async function testDatabaseConnection() {
   if (authRequired && !getAuthToken()) {
-    showToast("Enter the auth token above to test connection.", "error");
+    showToast(
+      "Auth token missing. Enter it above to test the connection.",
+      "error",
+    );
     return;
   }
 
@@ -833,7 +945,10 @@ async function saveDatabase(event) {
   event.preventDefault();
   if (!currentConfig) {
     if (authRequired && !getAuthToken()) {
-      showToast("Enter the auth token above to load config first.", "error");
+      showToast(
+        "Auth token missing. Enter it above to load configuration.",
+        "error",
+      );
     } else {
       showToast("Config not loaded yet. Please try again.", "error");
     }
@@ -858,14 +973,16 @@ async function saveDatabase(event) {
 
   const config = {
     ...currentConfig,
-    schedules: Array.isArray(currentConfig.schedules) ? [...currentConfig.schedules] : [],
+    schedules: Array.isArray(currentConfig.schedules)
+      ? [...currentConfig.schedules]
+      : [],
     databases: { ...currentConfig.databases },
   };
 
   if (originalName && originalName !== name) {
     delete config.databases[originalName];
     config.schedules = config.schedules.map((s) =>
-      s.database === originalName ? { ...s, database: name } : s
+      s.database === originalName ? { ...s, database: name } : s,
     );
   }
 
@@ -877,7 +994,7 @@ async function saveDatabase(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
     });
-    
+
     // Save password if provided
     if (password) {
       await savePassword(name, password);
@@ -886,7 +1003,7 @@ async function saveDatabase(event) {
         passwordConfigs.push(name);
       }
     }
-    
+
     currentConfig = config;
     renderDbCards();
     populateTriggerSelect();
@@ -913,12 +1030,12 @@ async function deleteDatabase(name) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
     });
-    
+
     // Delete password as well
     await deletePassword(name);
     // Remove from password status
     passwordConfigs = passwordConfigs.filter((p) => p !== name);
-    
+
     currentConfig = config;
     renderDbCards();
     populateTriggerSelect();
@@ -948,25 +1065,31 @@ function hideSaveTemplateModal() {
 
 async function saveAsTemplate() {
   if (authRequired && !getAuthToken()) {
-    showToast("Enter the auth token above to save a template.", "error");
+    showToast(
+      "Auth token missing. Enter it above to save a template.",
+      "error",
+    );
     return;
   }
 
   const templateName = document.getElementById("template-name").value.trim();
-  
+
   if (!templateName) {
     showToast("Template name is required", "error");
     return;
   }
-  
+
   if (!/^[a-zA-Z0-9_]+$/.test(templateName)) {
-    showToast("Template name: only letters, numbers, and underscores allowed", "error");
+    showToast(
+      "Template name: only letters, numbers, and underscores allowed",
+      "error",
+    );
     return;
   }
-  
+
   const values = getDbFormValues();
   if (!validateDbForm(values)) return;
-  
+
   const dbConfig = {
     db_host: values.db_host,
     db_port: values.db_port,
@@ -975,17 +1098,19 @@ async function saveAsTemplate() {
     ignored_tables: values.ignored_tables,
     structure_only_tables: values.structure_only_tables,
   };
-  
-  const includeSchedule = document.getElementById("template-include-schedule").checked;
-  const schedules = includeSchedule 
+
+  const includeSchedule = document.getElementById(
+    "template-include-schedule",
+  ).checked;
+  const schedules = includeSchedule
     ? [{ database: values.name, cron: "0 */6 * * *" }]
     : [];
-  
+
   const template = {
     databases: { [values.name]: dbConfig },
     schedules: schedules,
   };
-  
+
   try {
     await api("/api/templates", {
       method: "POST",
@@ -1013,13 +1138,16 @@ async function showTemplatesModal() {
         <p class="text-muted">Save a database configuration as a template to reuse it later.</p>
       `;
     } else {
-      list.innerHTML = names.map((name) => {
-        const t = templates[name] || {};
-        const dbNames = Object.keys(t.databases || {});
-        const dbCount = dbNames.length;
-        const scheduleCount = Array.isArray(t.schedules) ? t.schedules.length : 0;
-        
-        return `<div class="template-card">
+      list.innerHTML = names
+        .map((name) => {
+          const t = templates[name] || {};
+          const dbNames = Object.keys(t.databases || {});
+          const dbCount = dbNames.length;
+          const scheduleCount = Array.isArray(t.schedules)
+            ? t.schedules.length
+            : 0;
+
+          return `<div class="template-card">
           <div class="template-card-header">
             <strong>${name}</strong>
             <div class="template-card-actions">
@@ -1030,11 +1158,12 @@ async function showTemplatesModal() {
             </div>
           </div>
           <div class="template-card-body">
-            ${dbCount} database${dbCount !== 1 ? 's' : ''}${scheduleCount > 0 ? `, ${scheduleCount} schedule${scheduleCount !== 1 ? 's' : ''}` : ''}
+            ${dbCount} database${dbCount !== 1 ? "s" : ""}${scheduleCount > 0 ? `, ${scheduleCount} schedule${scheduleCount !== 1 ? "s" : ""}` : ""}
             <div class="template-db-list">${dbNames.join(", ")}</div>
           </div>
         </div>`;
-      }).join("");
+        })
+        .join("");
     }
   } catch (err) {
     list.innerHTML = `<p class="empty-state">Could not load templates: ${err.message}</p>`;
@@ -1090,7 +1219,13 @@ async function saveEditedTemplate() {
     return;
   }
 
-  if (!template || typeof template !== "object" || !template.databases || typeof template.databases !== "object" || !Array.isArray(template.schedules)) {
+  if (
+    !template ||
+    typeof template !== "object" ||
+    !template.databases ||
+    typeof template.databases !== "object" ||
+    !Array.isArray(template.schedules)
+  ) {
     showToast("Template must include 'databases' and 'schedules'", "error");
     return;
   }
@@ -1121,18 +1256,24 @@ async function previewTemplate(name) {
       showToast("Template not found", "error");
       return;
     }
-    
+
     currentPreviewTemplate = template;
     currentPreviewTemplateName = name;
-    
+
     const content = document.getElementById("template-preview-content");
-    
-    let dbHtml = '';
+
+    let dbHtml = "";
     const templateDatabases = template.databases || {};
     for (const [dbName, dbCfg] of Object.entries(templateDatabases)) {
-      const ignored = dbCfg.ignored_tables?.length > 0 ? dbCfg.ignored_tables.join(", ") : "none";
-      const structureOnly = dbCfg.structure_only_tables?.length > 0 ? dbCfg.structure_only_tables.join(", ") : "none";
-      
+      const ignored =
+        dbCfg.ignored_tables?.length > 0
+          ? dbCfg.ignored_tables.join(", ")
+          : "none";
+      const structureOnly =
+        dbCfg.structure_only_tables?.length > 0
+          ? dbCfg.structure_only_tables.join(", ")
+          : "none";
+
       dbHtml += `<div class="template-preview-db">
         <div class="db-name">${dbName}</div>
         <div class="db-details">${dbCfg.db_user}@${dbCfg.db_host}:${dbCfg.db_port}/${dbCfg.db_name}</div>
@@ -1140,22 +1281,26 @@ async function previewTemplate(name) {
         <div class="db-details">Structure-only: ${structureOnly}</div>
       </div>`;
     }
-    
-    let scheduleHtml = '';
-    const templateSchedules = Array.isArray(template.schedules) ? template.schedules : [];
+
+    let scheduleHtml = "";
+    const templateSchedules = Array.isArray(template.schedules)
+      ? template.schedules
+      : [];
     if (templateSchedules.length > 0) {
-      scheduleHtml = templateSchedules.map(s => {
-        const human = cronToHuman(s.cron) || s.cron;
-        return `<div class="template-preview-schedule">
+      scheduleHtml = templateSchedules
+        .map((s) => {
+          const human = cronToHuman(s.cron) || s.cron;
+          return `<div class="template-preview-schedule">
           <code>${s.cron}</code>
           <span class="text-muted">${human}</span>
           <span>for ${s.database}</span>
         </div>`;
-      }).join("");
+        })
+        .join("");
     } else {
       scheduleHtml = '<p class="text-muted">No schedules included</p>';
     }
-    
+
     content.innerHTML = `
       <div class="template-preview-section">
         <h4>Databases (${Object.keys(templateDatabases).length})</h4>
@@ -1166,7 +1311,7 @@ async function previewTemplate(name) {
         ${scheduleHtml}
       </div>
     `;
-    
+
     document.getElementById("template-preview-modal").hidden = false;
   } catch (err) {
     showToast(err.message, "error");
@@ -1189,7 +1334,10 @@ async function applyTemplate(name) {
   try {
     if (!currentConfig) {
       if (authRequired && !getAuthToken()) {
-        showToast("Enter the auth token above to load config first.", "error");
+        showToast(
+          "Auth token missing. Enter it above to load configuration.",
+          "error",
+        );
       } else {
         showToast("Config not loaded yet. Please try again.", "error");
       }
@@ -1209,12 +1357,18 @@ async function applyTemplate(name) {
 
     const config = {
       ...currentConfig,
-      schedules: Array.isArray(currentConfig.schedules) ? [...currentConfig.schedules] : [],
+      schedules: Array.isArray(currentConfig.schedules)
+        ? [...currentConfig.schedules]
+        : [],
       databases: { ...currentConfig.databases, ...template.databases },
     };
 
-    const existingScheduleKeys = new Set(config.schedules.map((s) => `${s.database}:${s.cron}`));
-    const templateSchedules = Array.isArray(template.schedules) ? template.schedules : [];
+    const existingScheduleKeys = new Set(
+      config.schedules.map((s) => `${s.database}:${s.cron}`),
+    );
+    const templateSchedules = Array.isArray(template.schedules)
+      ? template.schedules
+      : [];
     for (const schedule of templateSchedules) {
       const key = `${schedule.database}:${schedule.cron}`;
       if (!existingScheduleKeys.has(key)) {
@@ -1240,9 +1394,11 @@ async function applyTemplate(name) {
 
 async function deleteTemplate(name) {
   if (!confirm(`Delete template "${name}"?`)) return;
-  
+
   try {
-    await api(`/api/templates/${encodeURIComponent(name)}`, { method: "DELETE" });
+    await api(`/api/templates/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
     showToast(`Template "${name}" deleted`);
     showTemplatesModal();
   } catch (err) {
@@ -1257,19 +1413,22 @@ function renderSchedules() {
   const schedules = currentConfig.schedules || [];
 
   if (schedules.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No scheduled backups. Add one below.</td></tr>';
+    tbody.innerHTML =
+      '<tr><td colspan="4" class="empty-state">No scheduled backups. Add one below.</td></tr>';
     return;
   }
 
-  tbody.innerHTML = schedules.map((s, i) => {
-    const human = cronToHuman(s.cron) || s.cron;
-    return `<tr>
+  tbody.innerHTML = schedules
+    .map((s, i) => {
+      const human = cronToHuman(s.cron) || s.cron;
+      return `<tr>
       <td>${s.database}</td>
       <td><code>${s.cron}</code></td>
       <td class="text-muted">${human}</td>
       <td class="backup-actions"><button class="small danger" onclick="deleteSchedule(${i})">Delete</button></td>
     </tr>`;
-  }).join("");
+    })
+    .join("");
 }
 
 async function addSchedule() {
@@ -1336,14 +1495,18 @@ async function saveRetention(event) {
   event.preventDefault();
   if (!currentConfig) {
     if (authRequired && !getAuthToken()) {
-      showToast("Enter the auth token above to load config first.", "error");
+      showToast(
+        "Auth token missing. Enter it above to load configuration.",
+        "error",
+      );
     } else {
       showToast("Config not loaded yet. Please try again.", "error");
     }
     return;
   }
 
-  const retention = parseInt(document.getElementById("retention").value, 10) || 5;
+  const retention =
+    parseInt(document.getElementById("retention").value, 10) || 5;
   const config = { ...currentConfig, retention };
 
   try {
@@ -1378,9 +1541,15 @@ async function loadLogs() {
 
 // --- Init ---
 
-async function loadConfig() {
+async function loadConfig(options = {}) {
+  const {
+    throwOnUnauthorized = false,
+    missingAuthMessage = "Auth token missing. Enter it to load configuration.",
+    invalidAuthMessage = "Auth token invalid. Please re-enter.",
+  } = options;
+
   if (!isAuthReady()) {
-    setAuthHint(true, "Enter token to load config");
+    setAuthHint(true, missingAuthMessage);
     return;
   }
   try {
@@ -1393,9 +1562,11 @@ async function loadConfig() {
     setAuthHint(false);
   } catch (err) {
     if (authRequired && err.message === "Unauthorized") {
-      setAuthHint(true, "Enter token to load config");
+      setAuthHint(true, invalidAuthMessage);
+      if (throwOnUnauthorized) throw err;
     } else {
       showToast("Could not load config: " + err.message, "error");
+      if (throwOnUnauthorized) throw err;
     }
   }
 }
@@ -1410,12 +1581,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       restoreToken();
       const tokenInput = document.getElementById("auth-token");
       if (tokenInput) {
-        tokenInput.addEventListener("change", handleAuthTokenUpdate);
-        tokenInput.addEventListener("input", () => {
-          if (!tokenInput.value.trim()) {
-            setAuthHint(true, "Enter token to load config");
-          }
-        });
+        tokenInput.addEventListener("input", scheduleAuthTokenUpdate);
         tokenInput.addEventListener("keydown", (event) => {
           if (event.key === "Enter") {
             event.preventDefault();
@@ -1424,7 +1590,10 @@ document.addEventListener("DOMContentLoaded", async () => {
         });
       }
       if (!getAuthToken()) {
-        setAuthHint(true, "Enter token to load config");
+        setAuthHint(
+          true,
+          "Auth token missing. Enter it to load configuration.",
+        );
       }
     }
     // Check if decryption failed (shown in auth-required response)
@@ -1441,9 +1610,4 @@ document.addEventListener("DOMContentLoaded", async () => {
   pollStatus();
   setStatusPollInterval(5000);
   setInterval(loadBackups, 30000);
-
-  const searchInput = document.getElementById("backups-search-input");
-  if (searchInput) {
-    searchInput.addEventListener("input", () => renderBackups());
-  }
 });
