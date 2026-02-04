@@ -24,7 +24,17 @@ services:
       MARIADB_PASSWORD: "bakker_pass"
       MARIADB_ROOT_PASSWORD: "root_pass"
     healthcheck:
-      test: ["CMD", "mariadb-admin", "ping", "-h", "127.0.0.1", "-u", "root", "-proot_pass"]
+      test:
+        [
+          "CMD",
+          "mariadb-admin",
+          "ping",
+          "-h",
+          "127.0.0.1",
+          "-u",
+          "root",
+          "-proot_pass",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
