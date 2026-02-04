@@ -2,6 +2,15 @@
 
 let currentConfig = null;
 let statusPollInterval = null;
+let statusPollMs = 5000;
+let runningDatabases = new Set();
+let lastRunningCount = 0;
+let backupsCache = {};
+let backupsView = {
+  query: "",
+  limitPerDb: 5,
+  expanded: new Set(),
+};
 
 // --- Cron validation & preview ---
 
@@ -246,9 +255,18 @@ function showToast(message, type = "success") {
   setTimeout(() => toast.remove(), 3000);
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
 // --- Auth ---
 
 let authRequired = false;
+let lastAuthToastMessage = "";
+let lastAuthToastAt = 0;
 
 function getAuthToken() {
   const el = document.getElementById("auth-token");
@@ -272,10 +290,13 @@ function restoreToken() {
 }
 
 function setAuthHint(visible, message) {
-  const hint = document.getElementById("auth-hint");
-  if (hint) {
-    if (message) hint.textContent = message;
-    hint.hidden = !visible;
+  if (visible && message) {
+    const now = Date.now();
+    if (message !== lastAuthToastMessage || now - lastAuthToastAt > 5000) {
+      showToast(message, "error");
+      lastAuthToastMessage = message;
+      lastAuthToastAt = now;
+    }
   }
   const field = document.getElementById("auth-field");
   if (field) field.classList.toggle("auth-required", visible);
@@ -387,20 +408,66 @@ async function api(path, options = {}) {
 
 // --- Status polling ---
 
+function setStatusPollInterval(ms) {
+  if (statusPollMs === ms && statusPollInterval) return;
+  statusPollMs = ms;
+  if (statusPollInterval) clearInterval(statusPollInterval);
+  statusPollInterval = setInterval(pollStatus, ms);
+}
+
+function updateRunningIndicators(databases) {
+  runningDatabases = new Set(databases);
+
+  const list = document.getElementById("running-list");
+  if (list) {
+    if (databases.length === 0) {
+      list.innerHTML = '<span class="text-muted">No backups running.</span>';
+    } else {
+      list.innerHTML = `<span class="text-muted">Running now:</span>` +
+        databases.map((db) => `<span class="running-chip">${db}</span>`).join("");
+    }
+  }
+
+  const cards = document.querySelectorAll(".db-card[data-db]");
+  cards.forEach((card) => {
+    const name = card.getAttribute("data-db");
+    const isRunning = runningDatabases.has(name);
+    card.classList.toggle("is-running", isRunning);
+  });
+
+  renderBackups();
+}
+
 async function pollStatus() {
   if (!isAuthReady()) {
+    const list = document.getElementById("running-list");
+    if (list) {
+      list.innerHTML = authRequired
+        ? '<span class="text-muted">Enter token to view running backups.</span>'
+        : '<span class="text-muted">No backups running.</span>';
+    }
     return null;
   }
   try {
     const status = await api("/api/status");
     const el = document.getElementById("status-indicator");
-    if (status.running) {
+    const databases = Array.isArray(status.databases) ? status.databases : (status.database ? [status.database] : []);
+    if (databases.length > 0) {
       el.className = "status running";
-      el.textContent = `Backing up ${status.database}`;
+      el.textContent = databases.length === 1
+        ? `Running ${databases[0]}`
+        : `${databases.length} running`;
     } else {
       el.className = "status idle";
       el.textContent = "Idle";
     }
+    updateRunningIndicators(databases);
+
+    if (lastRunningCount > 0 && databases.length === 0) {
+      loadBackups();
+    }
+    lastRunningCount = databases.length;
+    setStatusPollInterval(databases.length > 0 ? 2000 : 5000);
     return status;
   } catch {
     // ignore polling errors
@@ -417,74 +484,135 @@ async function loadBackups() {
     return;
   }
   try {
-    const backups = await api("/api/backups");
-    const dbs = Object.keys(backups);
-
-    if (dbs.length === 0) {
-      container.innerHTML = '<p class="no-backups">No backups yet. Configure a database and trigger your first backup.</p>';
-      return;
-    }
-
-    let html = "";
-    for (const db of dbs.sort()) {
-      html += `<div class="env-group"><h3>${db}</h3>`;
-      html += `<table class="backup-table">
-        <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
-        <tbody>`;
-      for (const b of backups[db]) {
-        html += `<tr>
-          <td>${b.date}</td>
-          <td>${b.sizeHuman || `${b.sizeMB} MB`}</td>
-          <td class="backup-actions">
-            <button class="small secondary" data-download-file="${encodeURIComponent(b.filename)}">Download</button>
-            <button class="small danger" data-delete-file="${encodeURIComponent(b.filename)}">Delete</button>
-          </td>
-        </tr>`;
-      }
-      html += "</tbody></table></div>";
-    }
-    container.innerHTML = html;
-    container.querySelectorAll("[data-download-file]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        downloadBackup(decodeURIComponent(btn.dataset.downloadFile));
-      });
-    });
-    container.querySelectorAll("[data-delete-file]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        deleteBackup(decodeURIComponent(btn.dataset.deleteFile));
-      });
-    });
+    backupsCache = await api("/api/backups");
+    renderBackups();
   } catch (err) {
     container.innerHTML = `<p class="no-backups">Could not load backups: ${err.message}</p>`;
   }
 }
 
+function setBackupsViewFromControls() {
+  const input = document.getElementById("backups-search-input");
+  backupsView.query = input ? input.value.trim().toLowerCase() : "";
+}
+
+function renderBackups() {
+  const container = document.getElementById("backups-list");
+  if (!container) return;
+
+  const dbs = Object.keys(backupsCache || {});
+  if (dbs.length === 0) {
+    container.innerHTML = '<p class="no-backups">No backups yet. Configure a database and trigger your first backup.</p>';
+    return;
+  }
+
+  setBackupsViewFromControls();
+
+  let html = "";
+  const filteredDbs = dbs.sort().filter((db) => {
+    if (!backupsView.query) return true;
+    return db.toLowerCase().includes(backupsView.query);
+  });
+
+  if (filteredDbs.length === 0) {
+    container.innerHTML = '<p class="no-backups">No backups match the current filters.</p>';
+    return;
+  }
+
+  for (const db of filteredDbs) {
+    const list = backupsCache[db] || [];
+    const runningBadge = runningDatabases.has(db) ? '<span class="run-badge inline">Running</span>' : '';
+    const expanded = backupsView.expanded.has(db);
+    const inProgressFilename = runningDatabases.has(db) && list.length > 0 ? list[0].filename : null;
+    const filteredList = backupsView.query
+      ? list.filter((b) => b.filename.toLowerCase().includes(backupsView.query) || b.date.toLowerCase().includes(backupsView.query))
+      : list;
+    const visibleList = expanded ? filteredList : filteredList.slice(0, backupsView.limitPerDb);
+    html += `<div class="env-group">
+      <div class="env-group-header">
+        <h3>${db} ${runningBadge}</h3>
+        <div class="env-meta">${filteredList.length} backup${filteredList.length === 1 ? "" : "s"}</div>
+      </div>
+      <table class="backup-table">
+        <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
+        <tbody>`;
+
+    for (const b of visibleList) {
+      const isInProgress = inProgressFilename && b.filename === inProgressFilename;
+      const downloadDisabled = isInProgress ? "disabled aria-disabled=\"true\" data-in-progress=\"true\" title=\"Backup still running\"" : "";
+      const inProgressTag = isInProgress ? '<span class="progress-tag">In progress</span>' : "";
+      html += `<tr class="${isInProgress ? "in-progress" : ""}">
+        <td>${b.date}</td>
+        <td>${b.sizeHuman || `${b.sizeMB} MB`}</td>
+        <td class="backup-actions">
+          ${inProgressTag}
+          <button class="small secondary" data-download-file="${encodeURIComponent(b.filename)}" ${downloadDisabled}>Download</button>
+          <button class="small danger" data-delete-file="${encodeURIComponent(b.filename)}">Delete</button>
+        </td>
+      </tr>`;
+    }
+
+    if (visibleList.length === 0) {
+      html += `<tr><td colspan="3" class="empty-state">No backups for this filter.</td></tr>`;
+    }
+
+    html += `</tbody></table>`;
+
+    if (filteredList.length > backupsView.limitPerDb) {
+      html += `<div class="env-actions">
+        <button class="small secondary" data-toggle-db="${db}">
+          ${expanded ? "Show latest" : `Show all (${filteredList.length})`}
+        </button>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+  container.querySelectorAll("[data-download-file]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.inProgress === "true") {
+        showToast("Backup still in progress. Download is disabled until it completes.", "error");
+        return;
+      }
+      downloadBackup(decodeURIComponent(btn.dataset.downloadFile));
+    });
+  });
+  container.querySelectorAll("[data-delete-file]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      deleteBackup(decodeURIComponent(btn.dataset.deleteFile));
+    });
+  });
+  container.querySelectorAll("[data-toggle-db]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const db = btn.dataset.toggleDb;
+      if (!db) return;
+      if (backupsView.expanded.has(db)) {
+        backupsView.expanded.delete(db);
+      } else {
+        backupsView.expanded.add(db);
+      }
+      renderBackups();
+    });
+  });
+}
+
 async function downloadBackup(filename) {
   try {
     const token = getAuthToken();
-    const res = await fetch(`/api/backups/${encodeURIComponent(filename)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!res.ok) {
-      let msg = `Download failed (${res.status})`;
-      try {
-        const data = await res.json();
-        if (data?.error) msg = data.error;
-      } catch {
-        // ignore
-      }
-      throw new Error(msg);
+    if (authRequired && !token) {
+      showToast("Enter the auth token above to download backups.", "error");
+      return;
     }
 
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    const downloadUrl = `/api/backups/${encodeURIComponent(filename)}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
     const a = document.createElement("a");
-    a.href = url;
+    a.href = downloadUrl;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    showToast(`Download started for ${filename}`);
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -509,6 +637,10 @@ async function triggerBackup() {
     showToast("Pick a database first", "error");
     return;
   }
+  if (runningDatabases.has(database)) {
+    showToast(`Backup already running for ${database}`, "error");
+    return;
+  }
   const btn = document.getElementById("trigger-btn");
 
   btn.disabled = true;
@@ -519,15 +651,7 @@ async function triggerBackup() {
       body: JSON.stringify({ database }),
     });
     showToast(`Backup started for ${database}`);
-    if (statusPollInterval) clearInterval(statusPollInterval);
-    statusPollInterval = setInterval(async () => {
-      const status = await pollStatus();
-      if (!status || !status.running) {
-        clearInterval(statusPollInterval);
-        statusPollInterval = setInterval(pollStatus, 5000);
-        loadBackups();
-      }
-    }, 2000);
+    await pollStatus();
   } catch (err) {
     showToast(err.message, "error");
   } finally {
@@ -565,9 +689,13 @@ function renderDbCards() {
     const passStatus = hasPass 
       ? '<span class="password-status locked">Password set</span>'
       : '<span class="password-status unlocked">No password</span>';
-    html += `<div class="db-card">
+    const running = runningDatabases.has(name);
+    html += `<div class="db-card ${running ? "is-running" : ""}" data-db="${name}">
       <div class="db-card-header">
-        <strong>${name}</strong>
+        <div class="db-card-title">
+          <strong>${name}</strong>
+          <span class="run-badge">Running</span>
+        </div>
         <div class="backup-actions">
           <button class="small secondary" onclick="editDatabase('${name}')">Edit</button>
           <button class="small danger" onclick="deleteDatabase('${name}')">Delete</button>
@@ -896,6 +1024,7 @@ async function showTemplatesModal() {
             <strong>${name}</strong>
             <div class="template-card-actions">
               <button class="small" onclick="previewTemplate('${name}')">Preview</button>
+              <button class="small secondary" onclick="editTemplate('${name}')">Edit</button>
               <button class="small" onclick="applyTemplate('${name}')">Apply</button>
               <button class="small danger" onclick="deleteTemplate('${name}')">Delete</button>
             </div>
@@ -912,6 +1041,72 @@ async function showTemplatesModal() {
   }
 
   modal.hidden = false;
+}
+
+function showTemplateEditModal(name, template) {
+  const modal = document.getElementById("template-edit-modal");
+  const nameInput = document.getElementById("template-edit-name");
+  const jsonInput = document.getElementById("template-edit-json");
+  if (!modal || !nameInput || !jsonInput) return;
+  nameInput.value = name;
+  jsonInput.value = JSON.stringify(template, null, 2);
+  modal.hidden = false;
+}
+
+function hideTemplateEditModal() {
+  const modal = document.getElementById("template-edit-modal");
+  if (modal) modal.hidden = true;
+}
+
+async function editTemplate(name) {
+  try {
+    const templates = await api("/api/templates");
+    const template = templates[name];
+    if (!template) {
+      showToast("Template not found", "error");
+      return;
+    }
+    showTemplateEditModal(name, template);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+async function saveEditedTemplate() {
+  const nameInput = document.getElementById("template-edit-name");
+  const jsonInput = document.getElementById("template-edit-json");
+  if (!nameInput || !jsonInput) return;
+  const name = nameInput.value.trim();
+  if (!name) {
+    showToast("Template name is required", "error");
+    return;
+  }
+
+  let template;
+  try {
+    template = JSON.parse(jsonInput.value);
+  } catch (err) {
+    showToast("Template JSON is invalid", "error");
+    return;
+  }
+
+  if (!template || typeof template !== "object" || !template.databases || typeof template.databases !== "object" || !Array.isArray(template.schedules)) {
+    showToast("Template must include 'databases' and 'schedules'", "error");
+    return;
+  }
+
+  try {
+    await api(`/api/templates/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ template }),
+    });
+    hideTemplateEditModal();
+    showToast(`Template "${name}" updated`);
+    showTemplatesModal();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 function hideTemplatesModal() {
@@ -1199,7 +1394,6 @@ async function loadConfig() {
   } catch (err) {
     if (authRequired && err.message === "Unauthorized") {
       setAuthHint(true, "Enter token to load config");
-      showToast("Auth token required. Enter it above to load config.", "error");
     } else {
       showToast("Could not load config: " + err.message, "error");
     }
@@ -1245,6 +1439,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadConfig();
   loadLogs();
   pollStatus();
-  statusPollInterval = setInterval(pollStatus, 5000);
+  setStatusPollInterval(5000);
   setInterval(loadBackups, 30000);
+
+  const searchInput = document.getElementById("backups-search-input");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => renderBackups());
+  }
 });

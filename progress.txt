@@ -1,0 +1,20 @@
+Post-Iteration Actions (order): qa, simplify, deslop, review, commit
+
+Iteration: 1
+Task: T-001 Stabilize header + toast-only auth hints
+Status: done
+Decisions:
+- Removed inline auth hint element; guidance now via toast only.
+- Fixed header height to 64px to eliminate layout shifts.
+- Added auth toast debounce (5s) and removed duplicate unauthorized toast.
+Learnings:
+- Header layout shift was caused by the inline auth hint appearing in the header.
+Next:
+- T-002 Forward-only concise logs
+Post-Iteration Actions:
+- qa
+- simplify
+- deslop
+- review
+- commit
+

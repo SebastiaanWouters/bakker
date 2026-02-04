@@ -12,7 +12,6 @@
     <div class="header-right">
       <div id="auth-field" class="auth-field" hidden>
         <input type="password" id="auth-token" placeholder="Auth token" autocomplete="off">
-        <div id="auth-hint" class="auth-hint" hidden>Enter token to load config</div>
       </div>
       <div id="status-indicator" class="status idle">Idle</div>
     </div>
@@ -26,16 +25,24 @@
 
     <section id="trigger-section">
       <h2>Run backup</h2>
+      <p class="text-muted">Parallel-safe. Multiple databases can run at once.</p>
       <div class="trigger-controls">
         <select id="trigger-db">
           <option value="">No databases configured</option>
         </select>
         <button id="trigger-btn" onclick="triggerBackup()">Back up now</button>
       </div>
+      <div id="running-list" class="running-list"></div>
     </section>
 
     <section id="backups-section">
       <h2>Backups</h2>
+      <div class="backups-controls">
+        <div class="backups-search">
+          <label for="backups-search-input">Filter</label>
+          <input type="text" id="backups-search-input" placeholder="Search database or filename">
+        </div>
+      </div>
       <div id="backups-list">
         <p class="loading">Loading backups...</p>
       </div>
@@ -174,6 +181,25 @@
       <div class="modal-footer">
         <button id="template-preview-apply-btn" onclick="applyPreviewedTemplate()">Apply Template</button>
         <button class="secondary" onclick="hideTemplatePreviewModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="template-edit-modal" class="modal" hidden>
+    <div class="modal-content modal-wide">
+      <h3>Edit Template</h3>
+      <p class="text-muted">Update the template JSON. Keep it simple and valid.</p>
+      <div class="form-row">
+        <label for="template-edit-name">Template name</label>
+        <input type="text" id="template-edit-name" disabled>
+      </div>
+      <div class="form-row">
+        <label for="template-edit-json">Template JSON</label>
+        <textarea id="template-edit-json" rows="12" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button onclick="saveEditedTemplate()">Save changes</button>
+        <button class="secondary" onclick="hideTemplateEditModal()">Cancel</button>
       </div>
     </div>
   </div>
