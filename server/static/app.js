@@ -240,7 +240,7 @@ function showToast(message, type = "success") {
   toast.className = `toast ${type}`;
   toast.textContent = message;
   const existing = document.querySelectorAll(".toast");
-  const offset = 64 + existing.length * 48;
+  const offset = 68 + existing.length * 48;
   toast.style.top = `${offset}px`;
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 3000);
