@@ -420,6 +420,11 @@ button.secondary:disabled {
     padding-left: 0;
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: middle;
+    background: color-mix(in oklch, var(--surface), var(--bg-accent) 18%);
+    transition:
+        background 0.15s ease-out,
+        box-shadow 0.15s ease-out,
+        color 0.15s ease-out;
 }
 
 .backup-table tr:last-child td {
@@ -428,7 +433,8 @@ button.secondary:disabled {
 
 .backup-table tr:hover td {
     color: var(--text);
-    background: color-mix(in oklch, var(--accent-subtle), white 70%);
+    background: var(--surface);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent), white 72%);
 }
 
 .backup-table code {
@@ -459,11 +465,12 @@ button.secondary:disabled {
 
 .backup-table tr.in-progress td {
     color: var(--text-secondary);
-    background: color-mix(in oklch, var(--warning-subtle), white 60%);
+    background: color-mix(in oklch, var(--warning-subtle), var(--surface) 70%);
 }
 
 .backup-table tr.in-progress:hover td {
-    background: color-mix(in oklch, var(--warning-subtle), white 50%);
+    background: color-mix(in oklch, var(--warning-subtle), var(--surface) 55%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--warning), white 70%);
 }
 
 /* --- Responsive --- */
@@ -542,19 +549,21 @@ button.secondary:disabled {
 /* --- Database cards --- */
 
 .db-card {
-    border: 1px solid var(--border-subtle);
+    border: 1px solid color-mix(in oklch, var(--border), var(--bg-accent) 20%);
     border-left: 4px solid var(--accent);
     padding: var(--space-4) var(--space-6);
     margin-bottom: var(--space-2);
-    background: var(--surface);
+    background: color-mix(in oklch, var(--surface), var(--bg-accent) 22%);
     transition:
         background 0.12s,
-        border-color 0.12s;
+        border-color 0.12s,
+        box-shadow 0.12s;
 }
 
 .db-card:hover {
-    background: var(--surface-raised);
-    border-color: var(--border);
+    background: var(--surface);
+    border-color: color-mix(in oklch, var(--accent), var(--border) 55%);
+    box-shadow: 0 18px 32px -28px color-mix(in oklch, var(--accent), black 70%);
 }
 
 .db-card-header {
@@ -957,7 +966,7 @@ input[type="checkbox"] {
 
 .toast {
     position: fixed;
-    top: calc(var(--space-16) + 4px);
+    top: calc(var(--space-16) + 16px);
     left: var(--space-8);
     padding: var(--space-3) var(--space-6);
     font-size: var(--text-sm);

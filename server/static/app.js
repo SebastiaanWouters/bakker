@@ -1338,10 +1338,16 @@ async function applyTemplate(name) {
           "Auth token missing. Enter it above to load configuration.",
           "error",
         );
-      } else {
-        showToast("Config not loaded yet. Please try again.", "error");
+        return;
       }
-      return;
+      await loadConfig({
+        throwOnUnauthorized: true,
+        invalidAuthMessage: "Auth token invalid. Please re-enter.",
+      });
+      if (!currentConfig) {
+        showToast("Config not loaded yet. Please try again.", "error");
+        return;
+      }
     }
     const templates = await api("/api/templates");
     const template = templates[name];
