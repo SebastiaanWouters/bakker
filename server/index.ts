@@ -1161,6 +1161,18 @@ const server = Bun.serve({
       });
     }
 
+    // GET /llms.txt
+    if (method === "GET" && path === "/llms.txt") {
+      try {
+        const content = await readFile(join(STATIC_DIR, "llms.txt"), "utf-8");
+        return new Response(content, {
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        });
+      } catch {
+        return json({ error: "Not found" }, 404);
+      }
+    }
+
     // --- Static Files ---
     if (path === "/" || path === "/index.html") {
       return await serveIndexHtml();

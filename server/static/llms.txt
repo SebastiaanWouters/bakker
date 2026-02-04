@@ -1,0 +1,33 @@
+# Bakker
+
+> Lightweight, self-hosted MariaDB/MySQL backup service with a web UI, REST API, and cron-based scheduling.
+
+## Overview
+
+- Runs in Docker and stores all state under a mounted `/data` volume.
+- Uses cron inside the container for scheduled backups and retention.
+- If `AUTH_TOKEN` is set, all `/api/*` routes require `Authorization: Bearer <token>`.
+- If `ENCRYPTION_SECRET` is set, stored DB passwords are encrypted at rest.
+
+## API
+
+- [GET /api/config] - read current config
+- [PUT /api/config] - update config (validates cron + database references)
+- [GET /api/backups] - list backups grouped by database
+- [GET /api/backups/:filename] - download a backup
+- [DELETE /api/backups/:filename] - delete a backup
+- [POST /api/backups/trigger] - trigger a backup now
+- [GET /api/status] - current backup status
+- [GET /api/logs] - tail backup log
+- [GET /api/templates] - list templates
+- [POST /api/templates] - create template
+- [PUT /api/templates/:name] - update template
+- [DELETE /api/templates/:name] - delete template
+- [GET /api/passwords] - list configs with stored passwords
+- [POST /api/passwords/:configName] - store password
+- [DELETE /api/passwords/:configName] - delete password
+- [POST /api/test-connection] - test DB connection
+
+## Docs
+
+- [README](https://github.com/SebastiaanWouters/bakker#readme) - canonical overview, config schema, and API summary
