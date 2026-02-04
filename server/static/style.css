@@ -402,7 +402,6 @@ button.secondary:disabled {
 .backup-table th {
     text-align: left;
     padding: var(--space-2) var(--space-3);
-    padding-left: 0;
     color: var(--text-tertiary);
     font-weight: 500;
     font-size: var(--text-xs);
@@ -417,13 +416,12 @@ button.secondary:disabled {
 
 .backup-table td {
     padding: var(--space-3);
-    padding-left: 0;
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: middle;
-    background: color-mix(in oklch, var(--surface), var(--bg-accent) 18%);
+    background: color-mix(in oklch, var(--surface), var(--bg) 32%);
     transition:
         background 0.15s ease-out,
-        box-shadow 0.15s ease-out,
+        border-color 0.15s ease-out,
         color 0.15s ease-out;
 }
 
@@ -434,7 +432,7 @@ button.secondary:disabled {
 .backup-table tr:hover td {
     color: var(--text);
     background: var(--surface);
-    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent), white 72%);
+    border-bottom-color: color-mix(in oklch, var(--accent), white 75%);
 }
 
 .backup-table code {
@@ -470,7 +468,7 @@ button.secondary:disabled {
 
 .backup-table tr.in-progress:hover td {
     background: color-mix(in oklch, var(--warning-subtle), var(--surface) 55%);
-    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--warning), white 70%);
+    border-bottom-color: color-mix(in oklch, var(--warning), white 70%);
 }
 
 /* --- Responsive --- */
