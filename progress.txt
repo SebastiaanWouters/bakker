@@ -18,3 +18,20 @@ Post-Iteration Actions:
 - review
 - commit
 
+Iteration: 2
+Task: T-002 Forward-only concise logs
+Status: done
+Decisions:
+- Manual backups append captured output to /data/logs/backup.log and create /data/logs if missing.
+- Backup script logs reduced to start and completion lines plus errors only.
+Learnings:
+- Cron already redirects backup output to the same log file; manual path needed explicit append.
+Next:
+- T-003 Update UI branding to bakker
+Post-Iteration Actions:
+- qa
+- simplify
+- deslop
+- review
+- commit
+

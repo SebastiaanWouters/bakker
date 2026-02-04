@@ -1,4 +1,4 @@
-import { readdir, stat, unlink, readFile, writeFile, exists, chmod } from "node:fs/promises";
+import { readdir, stat, unlink, readFile, writeFile, exists, chmod, mkdir, appendFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync, createHash } from "node:crypto";
@@ -12,18 +12,24 @@ const CONFIG_FILE = "/data/config/config.json";
 const TEMPLATES_FILE = "/data/config/templates.json";
 const PASSWORDS_FILE = "/data/config/passwords.enc";
 const LOG_FILE = "/data/logs/backup.log";
-const STATUS_FILE = "/tmp/backup-status.json";
+const STATUS_DIR = "/tmp";
+const STATUS_PREFIX = "backup-status-";
+const STATUS_SUFFIX = ".json";
 const STATIC_DIR = resolve(import.meta.dir, "static");
 
 const ALGORITHM = "aes-256-gcm";
 
 // --- Auth ---
 
-function checkAuth(req: Request): Response | null {
+function checkAuth(req: Request, url?: URL): Response | null {
   if (!AUTH_TOKEN) return null;
   const header = req.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (token !== AUTH_TOKEN) {
+    if (url && req.method === "GET" && url.pathname.startsWith("/api/backups/") && url.pathname !== "/api/backups/trigger") {
+      const tokenParam = url.searchParams.get("token");
+      if (tokenParam && tokenParam === AUTH_TOKEN) return null;
+    }
     return json({ error: "Unauthorized" }, 401);
   }
   return null;
@@ -339,16 +345,56 @@ function isValidFilename(name: string): boolean {
   return !name.includes("..") && !name.includes("/") && !name.includes("\\") && name.length > 0;
 }
 
-async function getBackupStatus(): Promise<any> {
+interface BackupStatusEntry {
+  database: string;
+  started?: string;
+  pid?: number;
+}
+
+async function listRunningStatuses(): Promise<BackupStatusEntry[]> {
   try {
-    if (await exists(STATUS_FILE)) {
-      const raw = await readFile(STATUS_FILE, "utf-8");
-      return JSON.parse(raw);
+    const files = await readdir(STATUS_DIR);
+    const statusFiles = files.filter((file) => file.startsWith(STATUS_PREFIX) && file.endsWith(STATUS_SUFFIX));
+    const entries: BackupStatusEntry[] = [];
+
+    for (const file of statusFiles) {
+      const filePath = join(STATUS_DIR, file);
+      try {
+        const raw = await readFile(filePath, "utf-8");
+        const data = JSON.parse(raw) as BackupStatusEntry & { running?: boolean };
+        const database = typeof data.database === "string" && data.database.length > 0
+          ? data.database
+          : file.slice(STATUS_PREFIX.length, -STATUS_SUFFIX.length);
+        if (!database) continue;
+
+        if (typeof data.pid === "number") {
+          try {
+            process.kill(data.pid, 0);
+          } catch {
+            await unlink(filePath);
+            continue;
+          }
+        }
+
+        entries.push({ database, started: data.started, pid: data.pid });
+      } catch {
+        // ignore parse errors
+      }
     }
+
+    return entries;
   } catch {
-    // ignore parse errors
+    return [];
   }
-  return { running: false };
+}
+
+async function getBackupStatus(): Promise<any> {
+  const entries = await listRunningStatuses();
+  return {
+    running: entries.length > 0,
+    databases: entries.map((entry) => entry.database),
+    items: entries,
+  };
 }
 
 interface BackupInfo {
@@ -413,6 +459,7 @@ function triggerBackup(database: string, password?: string): Promise<{ success: 
     if (password) {
       env.DB_PASSWORD = password;
     }
+
     const proc = spawn("/app/scripts/backup.sh", [database], {
       stdio: ["ignore", "pipe", "pipe"],
       env,
@@ -429,6 +476,15 @@ function triggerBackup(database: string, password?: string): Promise<{ success: 
     });
 
     proc.on("close", (code: number | null) => {
+      const output = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+      if (output) {
+        mkdir("/data/logs", { recursive: true })
+          .then(() => appendFile(LOG_FILE, output + "\n"))
+          .catch(() => {
+            // ignore log append errors
+          });
+      }
+
       if (code === 0) {
         resolve({ success: true, message: stdout.trim() });
       } else {
@@ -460,7 +516,7 @@ const server = Bun.serve({
     const method = req.method;
 
     if (path.startsWith("/api/") && path !== "/api/auth-required") {
-      const authErr = checkAuth(req);
+      const authErr = checkAuth(req, url);
       if (authErr) return authErr;
     }
 
@@ -719,11 +775,6 @@ const server = Bun.serve({
 
     // POST /api/backups/trigger
     if (method === "POST" && path === "/api/backups/trigger") {
-      const status = await getBackupStatus();
-      if (status.running) {
-        return json({ error: "A backup is already running", status }, 409);
-      }
-
       let body: any;
       try {
         body = await req.json();
@@ -740,6 +791,11 @@ const server = Bun.serve({
       const config = await readConfig();
       if (!config.databases[database]) {
         return json({ error: `Database '${database}' not found in config` }, 400);
+      }
+
+      const running = await listRunningStatuses();
+      if (running.some((entry) => entry.database === database)) {
+        return json({ error: `Backup already running for '${database}'`, status: running }, 409);
       }
 
       // Get password for this database

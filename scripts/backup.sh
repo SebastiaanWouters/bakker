@@ -31,11 +31,11 @@ if ! flock -n 200; then
 fi
 
 # Write status file for the API
-STATUS_FILE="/tmp/backup-status.json"
-echo "{\"running\":true,\"database\":\"$CONFIG_NAME\",\"started\":\"$(date -Iseconds)\"}" > "$STATUS_FILE"
+STATUS_FILE="/tmp/backup-status-${CONFIG_NAME}.json"
+echo "{\"running\":true,\"database\":\"$CONFIG_NAME\",\"pid\":$$,\"started\":\"$(date -Iseconds)\"}" > "$STATUS_FILE"
 
 cleanup_status() {
-    echo '{"running":false}' > "$STATUS_FILE"
+    rm -f "$STATUS_FILE"
 }
 trap cleanup_status EXIT
 
@@ -63,12 +63,11 @@ fi
 
 # First try env var (server-triggered runs pass DB_PASSWORD)
 if [[ -n "${DB_PASSWORD:-}" ]]; then
-    log "Using password from environment"
+    : # password provided via env
 # Otherwise try API (cron jobs)
 elif [[ -n "${AUTH_TOKEN:-}" ]]; then
     API_URL="http://localhost:${PORT:-3500}/api/passwords/${CONFIG_NAME}"
-    log "Fetching password from API: $API_URL"
-    
+
     API_RESPONSE=$(curl -fsS --max-time 10 -H "Authorization: Bearer $AUTH_TOKEN" "$API_URL") ||
         error "Failed to fetch password from API. Ensure AUTH_TOKEN is set correctly and password is configured for '$CONFIG_NAME'."
     
@@ -81,13 +80,13 @@ else
     error "No password available. Set AUTH_TOKEN for API access or DB_PASSWORD env var."
 fi
 
+log "Backup started for '$CONFIG_NAME'"
+
 # Test connection
-log "Testing database connection to $DB_HOST:$DB_PORT as $DB_USER..."
 if ! MYSQL_PWD="$DB_PASSWORD" mariadb -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
     --connect-timeout=10 -e 'SELECT 1' "$DB_NAME" > /dev/null 2>&1; then
     error "Failed to connect to database $DB_NAME@$DB_HOST:$DB_PORT"
 fi
-log "Connection successful"
 
 # Read ignored_tables and structure_only_tables from config
 readarray -t IGNORED_TABLES < <(jq -r ".databases.\"${CONFIG_NAME}\".ignored_tables // [] | .[]" "$CONFIG_FILE")
@@ -108,8 +107,6 @@ done
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.sql.gz"
 
-log "Starting export to: $DUMP_FILE (${#IGNORED_TABLES[@]} ignored, ${#STRUCTURE_ONLY_TABLES[@]} structure-only)"
-
 # Execute mariadb-dump
 MYSQL_PWD="$DB_PASSWORD" mariadb-dump \
     -h "$DB_HOST" \
@@ -117,6 +114,7 @@ MYSQL_PWD="$DB_PASSWORD" mariadb-dump \
     -u "$DB_USER" \
     "$DB_NAME" \
     --single-transaction \
+    --quick \
     --skip-lock-tables \
     --no-tablespaces \
     --extended-insert \
@@ -133,11 +131,9 @@ fi
 
 FILE_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE" 2>/dev/null || echo "0")
 FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / 1024 / 1024}")
-log "Export completed: $DUMP_FILE (${FILE_SIZE_MB} MB)"
 
 # Run cleanup
-log "Running retention cleanup..."
 RETENTION=$(jq -r '.retention // 5' "$CONFIG_FILE")
 /app/scripts/cleanup.sh "$CONFIG_NAME" "$RETENTION"
 
-log "Backup completed successfully"
+log "Backup completed for '$CONFIG_NAME' (${FILE_SIZE_MB} MB)"
