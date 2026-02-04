@@ -1,0 +1,38 @@
+{
+  "description": "Database backup service",
+  "contact": "sebastiaan.wouters@kuleuven.be",
+  "org": "gbiomed",
+  "team": "dev",
+  "project": "${environment_name}",
+  "count": 1,
+  "image": "${docker_image}",
+  "imageUsername": "${CI_DEPLOY_USER}",
+  "imagePassword": "${CI_DEPLOY_PASSWORD}",
+  "env": [
+    {
+      "name": "DB_PASS_SCONE_PRODUCTION",
+      "value": "${DB_PASS_PRODUCTION}"
+    },
+    {
+      "name": "DB_PASS_SCONE_PREVIEW",
+      "value": "${DB_PASS_PREVIEW}"
+    },
+    {
+      "name": "AUTH_TOKEN",
+      "value": "${DB_BACKUP_AUTH_TOKEN}"
+    }
+  ],
+  "cpu": 2000,
+  "memory": 2048,
+  "ports": [
+    {
+      "port": "3500",
+      "portType": "http",
+      "healthCheckPath": "/",
+      "enableTraefik": true,
+      "traefikInternet": false
+    }
+  ],
+  "firewallOutInternal": true,
+  "firewallOutExternal": true
+}
