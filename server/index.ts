@@ -515,7 +515,11 @@ const server = Bun.serve({
     const path = url.pathname;
     const method = req.method;
 
-    if (path.startsWith("/api/") && path !== "/api/auth-required") {
+    if (
+      path.startsWith("/api/") &&
+      path !== "/api/auth-required" &&
+      path !== "/api/dev-reload"
+    ) {
       const authErr = checkAuth(req, url);
       if (authErr) return authErr;
     }
