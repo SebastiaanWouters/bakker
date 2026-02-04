@@ -99,7 +99,12 @@ function checkAuth(req: Request, url?: URL): Response | null {
   const header = req.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (token !== AUTH_TOKEN) {
-    if (url && req.method === "GET" && url.pathname.startsWith("/api/backups/") && url.pathname !== "/api/backups/trigger") {
+    if (
+      url &&
+      req.method === "GET" &&
+      url.pathname.startsWith("/api/backups/") &&
+      url.pathname !== "/api/backups/trigger"
+    ) {
       const tokenParam = url.searchParams.get("token");
       if (tokenParam && tokenParam === AUTH_TOKEN) return null;
     }
@@ -149,7 +154,10 @@ function decrypt(data: EncryptedData, secret: string): string | null {
     if (data.secretHash !== hashSecret(secret)) {
       return null;
     }
-    const saltHex = typeof data.salt === "string" && data.salt.length > 0 ? data.salt : "64622d6261636b75702d73616c74";
+    const saltHex =
+      typeof data.salt === "string" && data.salt.length > 0
+        ? data.salt
+        : "64622d6261636b75702d73616c74";
     const key = deriveKey(secret, saltHex);
     const iv = Buffer.from(data.iv, "hex");
     const authTag = Buffer.from(data.authTag, "hex");
@@ -169,12 +177,12 @@ let decryptionFailed = false;
 
 async function readPasswords(): Promise<Map<string, string>> {
   const passwords = new Map<string, string>();
-  
+
   if (!ENCRYPTION_SECRET) {
     decryptionFailed = false;
     return passwords;
   }
-  
+
   try {
     const raw = await readFile(PASSWORDS_FILE, "utf-8");
     if (!raw.trim()) {
@@ -182,13 +190,15 @@ async function readPasswords(): Promise<Map<string, string>> {
     }
     const data: EncryptedData = JSON.parse(raw);
     const decrypted = decrypt(data, ENCRYPTION_SECRET);
-    
+
     if (decrypted === null) {
       decryptionFailed = true;
-      console.warn("[passwords] Decryption failed - cannot decrypt stored passwords");
+      console.warn(
+        "[passwords] Decryption failed - cannot decrypt stored passwords",
+      );
       return passwords;
     }
-    
+
     const parsed = JSON.parse(decrypted);
     for (const [key, value] of Object.entries(parsed)) {
       passwords.set(key, value as string);
@@ -204,7 +214,7 @@ async function readPasswords(): Promise<Map<string, string>> {
     decryptionFailed = true;
     console.error("[passwords] Error reading passwords:", err.message);
   }
-  
+
   return passwords;
 }
 
@@ -212,18 +222,25 @@ async function writePasswords(passwords: Map<string, string>): Promise<void> {
   if (!ENCRYPTION_SECRET) {
     throw new Error("ENCRYPTION_SECRET not configured");
   }
-  
+
   const obj: Record<string, string> = {};
   for (const [key, value] of passwords) {
     obj[key] = value;
   }
-  
+
   const encrypted = encrypt(JSON.stringify(obj), ENCRYPTION_SECRET);
-  await writeFile(PASSWORDS_FILE, JSON.stringify(encrypted, null, 2) + "\n", "utf-8");
+  await writeFile(
+    PASSWORDS_FILE,
+    JSON.stringify(encrypted, null, 2) + "\n",
+    "utf-8",
+  );
   await chmod(PASSWORDS_FILE, 0o600);
 }
 
-async function setPassword(configName: string, password: string): Promise<void> {
+async function setPassword(
+  configName: string,
+  password: string,
+): Promise<void> {
   const passwords = await readPasswords();
   passwords.set(configName, password);
   await writePasswords(passwords);
@@ -256,7 +273,10 @@ function migrateConfig(config: any): { config: any; migrated: boolean } {
   const schedules: any[] = [];
   const schedule = config.schedule || "0 */6 * * *";
 
-  for (const [env, envCfg] of Object.entries(config.environments) as [string, any][]) {
+  for (const [env, envCfg] of Object.entries(config.environments) as [
+    string,
+    any,
+  ][]) {
     databases[env] = {
       db_host: envCfg.db_host,
       db_port: envCfg.db_port || "3306",
@@ -286,7 +306,9 @@ async function readConfig(): Promise<any> {
   const { config, migrated } = migrateConfig(parsed);
   if (migrated) {
     await writeConfig(config);
-    console.log("Config migrated from old environments format to new databases/schedules format");
+    console.log(
+      "Config migrated from old environments format to new databases/schedules format",
+    );
   }
   return config;
 }
@@ -297,7 +319,9 @@ async function writeConfig(config: any): Promise<void> {
 
 // --- Template storage ---
 
-async function readTemplates(): Promise<Record<string, { databases: Record<string, any>; schedules: any[] }>> {
+async function readTemplates(): Promise<
+  Record<string, { databases: Record<string, any>; schedules: any[] }>
+> {
   try {
     const raw = await readFile(TEMPLATES_FILE, "utf-8");
     return JSON.parse(raw);
@@ -306,8 +330,17 @@ async function readTemplates(): Promise<Record<string, { databases: Record<strin
   }
 }
 
-async function writeTemplates(templates: Record<string, { databases: Record<string, any>; schedules: any[] }>): Promise<void> {
-  await writeFile(TEMPLATES_FILE, JSON.stringify(templates, null, 2) + "\n", "utf-8");
+async function writeTemplates(
+  templates: Record<
+    string,
+    { databases: Record<string, any>; schedules: any[] }
+  >,
+): Promise<void> {
+  await writeFile(
+    TEMPLATES_FILE,
+    JSON.stringify(templates, null, 2) + "\n",
+    "utf-8",
+  );
 }
 
 // --- Crontab generation ---
@@ -332,7 +365,7 @@ function regenerateCrontab(config: any): void {
     const cron = schedule.cron;
     if (db && cron) {
       lines.push(
-        `${cron} root /app/scripts/backup.sh ${db} >> /data/logs/backup.log 2>&1`
+        `${cron} root /app/scripts/backup.sh ${db} >> /data/logs/backup.log 2>&1`,
       );
     }
   }
@@ -357,18 +390,36 @@ const CRON_RANGES = [
 ];
 
 const MONTH_NAMES: Record<string, number> = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
-  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
 };
 
 const DOW_NAMES_MAP: Record<string, number> = {
-  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
 };
 
 function resolveAlias(val: string, fieldIndex: number): number | null {
   const lower = val.toLowerCase();
-  if (fieldIndex === 3 && MONTH_NAMES[lower] !== undefined) return MONTH_NAMES[lower];
-  if (fieldIndex === 4 && DOW_NAMES_MAP[lower] !== undefined) return DOW_NAMES_MAP[lower];
+  if (fieldIndex === 3 && MONTH_NAMES[lower] !== undefined)
+    return MONTH_NAMES[lower];
+  if (fieldIndex === 4 && DOW_NAMES_MAP[lower] !== undefined)
+    return DOW_NAMES_MAP[lower];
   const n = parseInt(val, 10);
   return isNaN(n) ? null : n;
 }
@@ -384,24 +435,34 @@ function validateCron(expr: string): string | null {
     for (const part of parts) {
       if (!part) return `Empty value in list for ${range.name}`;
       const stepParts = part.split("/");
-      if (stepParts.length > 2) return `Invalid step in ${range.name}: "${part}"`;
+      if (stepParts.length > 2)
+        return `Invalid step in ${range.name}: "${part}"`;
       if (stepParts.length === 2) {
         const step = parseInt(stepParts[1], 10);
-        if (isNaN(step) || step < 1) return `Invalid step value "${stepParts[1]}" in ${range.name}`;
-        if (step > fieldSpan) return `Step ${step} exceeds range of ${range.name} (max ${fieldSpan})`;
+        if (isNaN(step) || step < 1)
+          return `Invalid step value "${stepParts[1]}" in ${range.name}`;
+        if (step > fieldSpan)
+          return `Step ${step} exceeds range of ${range.name} (max ${fieldSpan})`;
       }
       const base = stepParts[0];
       if (base === "*") continue;
       const rangeParts = base.split("-");
-      if (rangeParts.length > 2) return `Invalid range in ${range.name}: "${base}"`;
+      if (rangeParts.length > 2)
+        return `Invalid range in ${range.name}: "${base}"`;
       const resolved: number[] = [];
       for (const val of rangeParts) {
         const n = resolveAlias(val, i);
         if (n === null) {
-          const hint = i === 3 ? " (use 1-12 or JAN-DEC)" : i === 4 ? " (use 0-7 or SUN-SAT)" : "";
+          const hint =
+            i === 3
+              ? " (use 1-12 or JAN-DEC)"
+              : i === 4
+                ? " (use 0-7 or SUN-SAT)"
+                : "";
           return `"${val}" is not valid in ${range.name}${hint}`;
         }
-        if (n < range.min || n > range.max) return `${n} is out of range ${range.min}-${range.max} for ${range.name}`;
+        if (n < range.min || n > range.max)
+          return `${n} is out of range ${range.min}-${range.max} for ${range.name}`;
         resolved.push(n);
       }
       if (resolved.length === 2 && resolved[0] > resolved[1]) {
@@ -415,7 +476,12 @@ function validateCron(expr: string): string | null {
 // --- Helpers ---
 
 function isValidFilename(name: string): boolean {
-  return !name.includes("..") && !name.includes("/") && !name.includes("\\") && name.length > 0;
+  return (
+    !name.includes("..") &&
+    !name.includes("/") &&
+    !name.includes("\\") &&
+    name.length > 0
+  );
 }
 
 interface BackupStatusEntry {
@@ -427,17 +493,22 @@ interface BackupStatusEntry {
 async function listRunningStatuses(): Promise<BackupStatusEntry[]> {
   try {
     const files = await readdir(STATUS_DIR);
-    const statusFiles = files.filter((file) => file.startsWith(STATUS_PREFIX) && file.endsWith(STATUS_SUFFIX));
+    const statusFiles = files.filter(
+      (file) => file.startsWith(STATUS_PREFIX) && file.endsWith(STATUS_SUFFIX),
+    );
     const entries: BackupStatusEntry[] = [];
 
     for (const file of statusFiles) {
       const filePath = join(STATUS_DIR, file);
       try {
         const raw = await readFile(filePath, "utf-8");
-        const data = JSON.parse(raw) as BackupStatusEntry & { running?: boolean };
-        const database = typeof data.database === "string" && data.database.length > 0
-          ? data.database
-          : file.slice(STATUS_PREFIX.length, -STATUS_SUFFIX.length);
+        const data = JSON.parse(raw) as BackupStatusEntry & {
+          running?: boolean;
+        };
+        const database =
+          typeof data.database === "string" && data.database.length > 0
+            ? data.database
+            : file.slice(STATUS_PREFIX.length, -STATUS_SUFFIX.length);
         if (!database) continue;
 
         if (typeof data.pid === "number") {
@@ -526,7 +597,10 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   return grouped;
 }
 
-function triggerBackup(database: string, password?: string): Promise<{ success: boolean; message: string }> {
+function triggerBackup(
+  database: string,
+  password?: string,
+): Promise<{ success: boolean; message: string }> {
   return new Promise((resolve) => {
     const env = { ...process.env };
     if (password) {
@@ -602,7 +676,11 @@ const server = Bun.serve({
       if (ENCRYPTION_SECRET) {
         await readPasswords();
       }
-      return json({ required: !!AUTH_TOKEN, decryptionFailed, encryptionConfigured: !!ENCRYPTION_SECRET });
+      return json({
+        required: !!AUTH_TOKEN,
+        decryptionFailed,
+        encryptionConfigured: !!ENCRYPTION_SECRET,
+      });
     }
 
     // GET /api/templates
@@ -622,35 +700,60 @@ const server = Bun.serve({
 
       const { db_host, db_port, db_name, db_user, password } = body || {};
       if (!db_host || !db_name || !db_user || !password) {
-        return json({ error: "Missing required fields: db_host, db_name, db_user, password" }, 400);
+        return json(
+          {
+            error:
+              "Missing required fields: db_host, db_name, db_user, password",
+          },
+          400,
+        );
       }
 
-      const port = typeof db_port === "string" && db_port.trim().length > 0 ? db_port.trim() : "3306";
+      const port =
+        typeof db_port === "string" && db_port.trim().length > 0
+          ? db_port.trim()
+          : "3306";
       const args = [
-        "-h", db_host,
-        "-P", port,
-        "-u", db_user,
-        "-D", db_name,
-        "-e", "SELECT 1;",
+        "-h",
+        db_host,
+        "-P",
+        port,
+        "-u",
+        db_user,
+        "-D",
+        db_name,
+        "-e",
+        "SELECT 1;",
       ];
 
       try {
-        const result = await new Promise<{ code: number | null }>((resolve, reject) => {
-          const child = spawn("mariadb", args, {
-            stdio: "ignore",
-            env: { ...process.env, MYSQL_PWD: password },
-          });
-          child.on("error", reject);
-          child.on("close", (code) => resolve({ code }));
-        });
+        const result = await new Promise<{ code: number | null }>(
+          (resolve, reject) => {
+            const child = spawn("mariadb", args, {
+              stdio: "ignore",
+              env: { ...process.env, MYSQL_PWD: password },
+            });
+            child.on("error", reject);
+            child.on("close", (code) => resolve({ code }));
+          },
+        );
 
         if (result.code !== 0) {
-          return json({ error: "Failed to connect. Check host, user, password, and database name." }, 400);
+          return json(
+            {
+              error:
+                "Failed to connect. Check host, user, password, and database name.",
+            },
+            400,
+          );
         }
 
         return json({ success: true, message: "Connection successful" });
       } catch (err: any) {
-        return json({ error: err?.message || "Failed to run connection test" }, 500);
+        return json(
+          { error: err?.message || "Failed to run connection test" },
+          500,
+        );
       }
     }
 
@@ -704,7 +807,10 @@ const server = Bun.serve({
       if (!body.template || typeof body.template !== "object") {
         return json({ error: "Missing or invalid 'template' field" }, 400);
       }
-      if (!body.template.databases || typeof body.template.databases !== "object") {
+      if (
+        !body.template.databases ||
+        typeof body.template.databases !== "object"
+      ) {
         return json({ error: "Template must have 'databases' object" }, 400);
       }
       if (!Array.isArray(body.template.schedules)) {
@@ -742,20 +848,27 @@ const server = Bun.serve({
     if (method === "GET" && path === "/api/passwords") {
       const config = await readConfig();
       const configured = new Set(Object.keys(config.databases || {}));
-      const configs = (await listPasswordConfigs()).filter((name) => configured.has(name));
+      const configs = (await listPasswordConfigs()).filter((name) =>
+        configured.has(name),
+      );
       return json({ configs, decryptionFailed });
     }
 
     // GET /api/passwords/:configName - get password (internal use by backup script)
     if (method === "GET" && path.startsWith("/api/passwords/")) {
-      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      const configName = decodeURIComponent(
+        path.slice("/api/passwords/".length),
+      );
       if (!configName) {
         return json({ error: "Config name required" }, 400);
       }
 
       const config = await readConfig();
       if (!config.databases?.[configName]) {
-        return json({ error: `Database '${configName}' not found in config` }, 404);
+        return json(
+          { error: `Database '${configName}' not found in config` },
+          404,
+        );
       }
 
       const password = await getPassword(configName);
@@ -767,14 +880,19 @@ const server = Bun.serve({
 
     // POST /api/passwords/:configName - save password
     if (method === "POST" && path.startsWith("/api/passwords/")) {
-      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      const configName = decodeURIComponent(
+        path.slice("/api/passwords/".length),
+      );
       if (!configName) {
         return json({ error: "Config name required" }, 400);
       }
 
       const config = await readConfig();
       if (!config.databases?.[configName]) {
-        return json({ error: `Database '${configName}' not found in config` }, 400);
+        return json(
+          { error: `Database '${configName}' not found in config` },
+          400,
+        );
       }
 
       let body: any;
@@ -796,14 +914,19 @@ const server = Bun.serve({
 
     // DELETE /api/passwords/:configName - delete password
     if (method === "DELETE" && path.startsWith("/api/passwords/")) {
-      const configName = decodeURIComponent(path.slice("/api/passwords/".length));
+      const configName = decodeURIComponent(
+        path.slice("/api/passwords/".length),
+      );
       if (!configName) {
         return json({ error: "Config name required" }, 400);
       }
 
       const config = await readConfig();
       if (!config.databases?.[configName]) {
-        return json({ error: `Database '${configName}' not found in config` }, 400);
+        return json(
+          { error: `Database '${configName}' not found in config` },
+          400,
+        );
       }
 
       await deletePassword(configName);
@@ -867,25 +990,45 @@ const server = Bun.serve({
       // Verify database exists in config
       const config = await readConfig();
       if (!config.databases[database]) {
-        return json({ error: `Database '${database}' not found in config` }, 400);
+        return json(
+          { error: `Database '${database}' not found in config` },
+          400,
+        );
       }
 
       const running = await listRunningStatuses();
       if (running.some((entry) => entry.database === database)) {
-        return json({ error: `Backup already running for '${database}'`, status: running }, 409);
+        return json(
+          {
+            error: `Backup already running for '${database}'`,
+            status: running,
+          },
+          409,
+        );
       }
 
       // Get password for this database
       const password = await getPassword(database);
       if (!password) {
-        return json({ error: `No password configured for '${database}'. Please set the password in the database configuration.` }, 400);
+        return json(
+          {
+            error: `No password configured for '${database}'. Please set the password in the database configuration.`,
+          },
+          400,
+        );
       }
 
       triggerBackup(database, password).then((result) => {
-        console.log(`Backup ${database} finished:`, result.success ? "OK" : result.message);
+        console.log(
+          `Backup ${database} finished:`,
+          result.success ? "OK" : result.message,
+        );
       });
 
-      return json({ success: true, message: `Backup triggered for ${database}` });
+      return json({
+        success: true,
+        message: `Backup triggered for ${database}`,
+      });
     }
 
     // GET /api/status
@@ -910,25 +1053,49 @@ const server = Bun.serve({
       }
 
       // Validate required fields
-      if (typeof newConfig.retention !== "number" || !newConfig.databases || typeof newConfig.databases !== "object") {
-        return json({ error: "Missing required fields: retention (number), databases (object)" }, 400);
+      if (
+        typeof newConfig.retention !== "number" ||
+        !newConfig.databases ||
+        typeof newConfig.databases !== "object"
+      ) {
+        return json(
+          {
+            error:
+              "Missing required fields: retention (number), databases (object)",
+          },
+          400,
+        );
       }
 
       if (!Array.isArray(newConfig.schedules)) {
-        return json({ error: "Missing required field: schedules (array)" }, 400);
+        return json(
+          { error: "Missing required field: schedules (array)" },
+          400,
+        );
       }
 
       // Validate each schedule
       for (const schedule of newConfig.schedules) {
         if (!schedule.database || !schedule.cron) {
-          return json({ error: "Each schedule must have 'database' and 'cron' fields" }, 400);
+          return json(
+            { error: "Each schedule must have 'database' and 'cron' fields" },
+            400,
+          );
         }
         if (!newConfig.databases[schedule.database]) {
-          return json({ error: `Schedule references unknown database: '${schedule.database}'` }, 400);
+          return json(
+            {
+              error: `Schedule references unknown database: '${schedule.database}'`,
+            },
+            400,
+          );
         }
         const cronErr = validateCron(schedule.cron);
         if (cronErr) {
-          return json({ error: `Invalid cron for '${schedule.database}': ${cronErr}` }, 400);
+          return json(
+            { error: `Invalid cron for '${schedule.database}': ${cronErr}` },
+            400,
+          );
         }
       }
 
@@ -1013,10 +1180,12 @@ const server = Bun.serve({
 });
 
 // Run config migration on startup
-readConfig().then((config) => {
-  regenerateCrontab(config);
-  console.log(`DB Backup server running on ${HOST}:${PORT}`);
-}).catch((err) => {
-  console.error("Failed to read config on startup:", err);
-  console.log(`DB Backup server running on ${HOST}:${PORT}`);
-});
+readConfig()
+  .then((config) => {
+    regenerateCrontab(config);
+    console.log(`DB Backup server running on ${HOST}:${PORT}`);
+  })
+  .catch((err) => {
+    console.error("Failed to read config on startup:", err);
+    console.log(`DB Backup server running on ${HOST}:${PORT}`);
+  });
