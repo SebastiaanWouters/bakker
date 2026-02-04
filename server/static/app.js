@@ -643,7 +643,7 @@ function renderBackups() {
     }
 
     if (visibleList.length === 0) {
-      html += `<tr><td colspan="3" class="empty-state">No backups for this filter.</td></tr>`;
+      html += `<tr><td colspan="3" class="empty-state">No backups for this database yet.</td></tr>`;
     }
 
     html += `</tbody></table>`;
