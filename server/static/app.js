@@ -329,25 +329,43 @@ let lastAuthToastMessage = "";
 let lastAuthToastAt = 0;
 let authUpdateTimer = null;
 let lastAuthToken = "";
+const AUTH_TOKEN_TTL_MS = 15 * 60 * 1000;
+let authTokenExpiresAt = 0;
+let authTokenClearTimer = null;
 
 function getAuthToken() {
   const el = document.getElementById("auth-token");
-  return el ? el.value.trim() : "";
+  const value = el ? el.value.trim() : "";
+  if (authTokenExpiresAt && Date.now() > authTokenExpiresAt) {
+    clearAuthToken("Auth token expired. Please re-enter.");
+    return "";
+  }
+  return value;
 }
 
 function isAuthReady() {
   return !authRequired || !!getAuthToken();
 }
 
-function persistToken() {
-  sessionStorage.setItem("backup-auth-token", getAuthToken());
+function scheduleTokenExpiry() {
+  const token = getAuthToken();
+  if (!token) return;
+  authTokenExpiresAt = Date.now() + AUTH_TOKEN_TTL_MS;
+  if (authTokenClearTimer) clearTimeout(authTokenClearTimer);
+  authTokenClearTimer = setTimeout(() => {
+    clearAuthToken("Auth token expired. Please re-enter.");
+  }, AUTH_TOKEN_TTL_MS + 50);
 }
 
-function restoreToken() {
-  const saved = sessionStorage.getItem("backup-auth-token");
-  if (saved) {
-    const el = document.getElementById("auth-token");
-    if (el) el.value = saved;
+function clearAuthToken(message) {
+  const el = document.getElementById("auth-token");
+  if (el) el.value = "";
+  lastAuthToken = "";
+  authTokenExpiresAt = 0;
+  if (authTokenClearTimer) clearTimeout(authTokenClearTimer);
+  authTokenClearTimer = null;
+  if (authRequired && message) {
+    setAuthHint(true, message);
   }
 }
 
@@ -365,7 +383,7 @@ function setAuthHint(visible, message) {
 }
 
 function scheduleAuthTokenUpdate() {
-  persistToken();
+  scheduleTokenExpiry();
   const token = getAuthToken();
   if (!token) {
     if (authRequired) {
@@ -381,7 +399,7 @@ function scheduleAuthTokenUpdate() {
 }
 
 async function handleAuthTokenUpdate(expectedToken) {
-  persistToken();
+  scheduleTokenExpiry();
   const token = expectedToken ?? getAuthToken();
   if (!token) {
     if (authRequired) {
@@ -481,6 +499,7 @@ async function api(path, options = {}) {
   const token = getAuthToken();
   if (token) {
     options.headers = { ...options.headers, Authorization: `Bearer ${token}` };
+    scheduleTokenExpiry();
   }
   const res = await fetch(path, options);
   if (path.endsWith("/logs")) {
@@ -700,14 +719,28 @@ async function downloadBackup(filename) {
       );
       return;
     }
-
-    const downloadUrl = `/api/backups/${encodeURIComponent(filename)}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+    const res = await fetch(`/api/backups/${encodeURIComponent(filename)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!res.ok) {
+      let message = `Download failed (${res.status})`;
+      try {
+        const data = await res.json();
+        message = data.error || message;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = downloadUrl;
+    a.href = url;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
+    URL.revokeObjectURL(url);
     showToast(`Download started for ${filename}`);
   } catch (err) {
     showToast(err.message, "error");
@@ -1548,7 +1581,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (data.required) {
       authRequired = true;
       document.getElementById("auth-field").hidden = false;
-      restoreToken();
       const tokenInput = document.getElementById("auth-token");
       if (tokenInput) {
         tokenInput.addEventListener("input", scheduleAuthTokenUpdate);
@@ -1580,4 +1612,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   pollStatus();
   setStatusPollInterval(5000);
   setInterval(loadBackups, 30000);
+});
+
+window.addEventListener("beforeunload", () => {
+  clearAuthToken();
 });

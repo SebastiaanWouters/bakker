@@ -75,14 +75,14 @@ Data is stored under `/data` (mounted volume recommended):
 
 - `PORT` (default `3500`) - HTTP server port.
 - `HOST` (default `::`) - HTTP server bind address. Use `::` for IPv6, `0.0.0.0` for IPv4.
-- `AUTH_TOKEN` - if set, all `/api/*` endpoints require `Authorization: Bearer <token>`.
+- `AUTH_TOKEN` - required in production. All `/api/*` endpoints require `Authorization: Bearer <token>`. The service refuses to start if missing when `DEV` is not `1`.
 - `ENCRYPTION_SECRET` - required to store and retrieve encrypted DB passwords.
 
 If `ENCRYPTION_SECRET` is not set, the password store is disabled and backups can only run if `DB_PASSWORD` is provided to the backup script directly. For scheduled/cron backups, set `ENCRYPTION_SECRET` and use the API/UI to store passwords.
 
 ## API Summary
 
-All `/api/*` routes require auth if `AUTH_TOKEN` is set.
+All `/api/*` routes require auth in production. Provide `Authorization: Bearer <token>` on requests.
 
 - `GET /api/config` - read config
 - `PUT /api/config` - update config (validates cron + database references)

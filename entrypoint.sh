@@ -9,6 +9,12 @@ STATUS_PATTERN="/tmp/backup-status-*.json"
 
 echo "[entrypoint] Starting DB Backup service..."
 
+# Enforce auth token in non-dev environments
+if [[ "${DEV:-0}" != "1" && -z "${AUTH_TOKEN:-}" ]]; then
+    echo "[entrypoint] ERROR: AUTH_TOKEN is required in production. Set AUTH_TOKEN and restart."
+    exit 1
+fi
+
 # Ensure directories exist
 mkdir -p /data/backups /data/config "$LOG_DIR"
 

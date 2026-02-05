@@ -6,7 +6,7 @@
 
 - Runs in Docker and stores all state under a mounted `/data` volume.
 - Uses cron inside the container for scheduled backups and retention.
-- If `AUTH_TOKEN` is set, all `/api/*` routes require `Authorization: Bearer <token>`.
+- `AUTH_TOKEN` is required in production. All `/api/*` routes require `Authorization: Bearer <token>`.
 - If `ENCRYPTION_SECRET` is set, stored DB passwords are encrypted at rest.
 
 ## API

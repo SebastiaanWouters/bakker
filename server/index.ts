@@ -37,6 +37,13 @@ const STATIC_DIR = resolve(import.meta.dir, "static");
 
 const ALGORITHM = "aes-256-gcm";
 
+if (!DEV && !AUTH_TOKEN) {
+  console.error(
+    "[startup] AUTH_TOKEN is required in production. Refusing to start.",
+  );
+  process.exit(1);
+}
+
 // --- Dev Live Reload ---
 
 const devReloadClients = new Set<{ write: (chunk: string) => Promise<void> }>();
@@ -99,15 +106,6 @@ function checkAuth(req: Request, url?: URL): Response | null {
   const header = req.headers.get("Authorization") || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (token !== AUTH_TOKEN) {
-    if (
-      url &&
-      req.method === "GET" &&
-      url.pathname.startsWith("/api/backups/") &&
-      url.pathname !== "/api/backups/trigger"
-    ) {
-      const tokenParam = url.searchParams.get("token");
-      if (tokenParam && tokenParam === AUTH_TOKEN) return null;
-    }
     return json({ error: "Unauthorized" }, 401);
   }
   return null;
