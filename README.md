@@ -98,6 +98,37 @@ All `/api/*` routes require auth in production. Provide `Authorization: Bearer <
 - `GET /api/templates` - list templates
 - `POST /api/templates` / `PUT /api/templates/:name` / `DELETE /api/templates/:name`
 
+## CLI
+
+A companion CLI is available at `cli/bakker`.
+
+It supports:
+- listing backups from the API
+- importing a backup into configured target DB profiles
+
+Quick setup:
+
+```bash
+chmod +x cli/bakker
+mkdir -p ~/.config/bakker
+cp cli/config.toml.example ~/.config/bakker/config.toml
+```
+
+Auth:
+- set `BAKKER_AUTH_TOKEN`, or
+- leave it unset and the CLI will ask interactively.
+- for import destination DB passwords, set `<PROFILE>_DB_PASS` (profile uppercased, non-alnum -> `_`), otherwise CLI prompts interactively.
+
+Examples:
+
+```bash
+cli/bakker backups list
+cli/bakker backups list --db prod --latest
+cli/bakker import --profile local_dev --db prod --latest
+```
+
+For full CLI usage, see `cli/README.md`.
+
 ## How Backups Work
 
 Backups are created by `/app/scripts/backup.sh` using `mariadb-dump` and gzip. Each backup is saved as:

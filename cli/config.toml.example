@@ -1,0 +1,20 @@
+[bakker]
+api_url = "http://localhost:3500"
+container = "bakker"
+timeout_seconds = 30
+
+[defaults]
+output = "table"
+confirm_import = true
+
+[profiles.local_dev]
+host = "127.0.0.1"
+port = 3306
+user = "restore_user"
+database = "app_local"
+
+[profiles.staging]
+host = "staging-db.internal"
+port = 3306
+user = "restore_user"
+database = "app_staging"

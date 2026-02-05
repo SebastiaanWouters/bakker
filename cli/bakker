@@ -1,0 +1,874 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+CONFIG_PATH="${BAKKER_CONFIG:-$HOME/.config/bakker/config.toml}"
+BAKKER_API_URL=""
+BAKKER_CONTAINER=""
+REQUEST_TIMEOUT=""
+DEFAULT_OUTPUT=""
+DEFAULT_CONFIRM_IMPORT=""
+
+OVERRIDE_API_URL=""
+OVERRIDE_CONTAINER=""
+OVERRIDE_TIMEOUT=""
+OVERRIDE_OUTPUT=""
+
+PROFILE_NAMES=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  bakker [global options] <command> [options]
+  bakker help [command]
+
+Global options:
+  --config <path>        Path to config.toml
+  --api-url <url>        Override Bakker API URL
+  --container <name>     Override docker container name
+  --timeout <seconds>    Override API timeout
+  --output <table|json>  Override output format
+  --help                 Show this help
+
+Commands:
+  backups list [--db <name>] [--latest] [--json]               List backups from Bakker API
+  import --profile <name> (--file <filename> | --db <name> --latest) [--yes]  Import backup into destination DB
+  profiles list                                                 List configured destination profiles
+  profiles show <name>                                          Show one destination profile
+  doctor                                                        Run local and Bakker health checks
+  version                                                       Print CLI version
+
+Password env convention:
+  For profile "<name>", set "<NAME>_DB_PASS" (uppercased, non-alnum -> _).
+  Example: profile "local-dev" -> LOCAL_DEV_DB_PASS
+
+Examples:
+  bakker --help
+  bakker help import
+  bakker backups --help
+  bakker import --help
+USAGE
+}
+
+usage_backups() {
+  cat <<'USAGE'
+Usage:
+  bakker backups list [--db <name>] [--latest] [--json]
+
+Options:
+  --db <name>    Filter backups to a Bakker database config name
+  --latest       Show only latest backup per database (or for --db)
+  --json         Print raw API JSON instead of table output
+  --help, -h     Show this help
+USAGE
+}
+
+usage_import() {
+  cat <<'USAGE'
+Usage:
+  bakker import --profile <name> (--file <filename> | --db <name> --latest) [--yes]
+
+Options:
+  --profile <name>  Destination profile from config.toml (required)
+  --file <name>     Backup filename to import
+  --db <name>       Bakker database config name (requires --latest)
+  --latest          Resolve latest backup for --db
+  --yes             Skip import confirmation prompt
+  --help, -h        Show this help
+
+Notes:
+  - Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
+  - Destination DB password can come from <PROFILE>_DB_PASS (e.g. LOCAL_DEV_DB_PASS).
+  - If that env var is not set, password is requested interactively.
+USAGE
+}
+
+usage_profiles() {
+  cat <<'USAGE'
+Usage:
+  bakker profiles list
+  bakker profiles show <name>
+
+Options:
+  --help, -h    Show this help
+USAGE
+}
+
+usage_doctor() {
+  cat <<'USAGE'
+Usage:
+  bakker doctor
+
+Runs local and Bakker connectivity checks.
+
+Options:
+  --help, -h    Show this help
+USAGE
+}
+
+command_help() {
+  local topic="${1:-}"
+  case "$topic" in
+    ""|-h|--help) usage ;;
+    backups) usage_backups ;;
+    import) usage_import ;;
+    profiles) usage_profiles ;;
+    doctor) usage_doctor ;;
+    version)
+      cat <<'USAGE'
+Usage:
+  bakker version
+USAGE
+      ;;
+    *)
+      echo "Error: unknown help topic '$topic'" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+strip_quotes() {
+  local v
+  v="$(trim "$1")"
+  if [[ "$v" =~ ^\"(.*)\"$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "$v" =~ ^\'(.*)\'$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return
+  fi
+  printf '%s' "$v"
+}
+
+profile_key() {
+  local name="$1"
+  local key="$2"
+  printf 'PROFILE__%s__%s' "$name" "$key"
+}
+
+set_profile_value() {
+  local name="$1"
+  local key="$2"
+  local value="$3"
+  local var
+  var="$(profile_key "$name" "$key")"
+  printf -v "$var" '%s' "$value"
+}
+
+get_profile_value() {
+  local name="$1"
+  local key="$2"
+  local var
+  var="$(profile_key "$name" "$key")"
+  printf '%s' "${!var-}"
+}
+
+add_profile_name() {
+  local name="$1"
+  if [[ -z "$PROFILE_NAMES" ]]; then
+    PROFILE_NAMES="$name"
+    return
+  fi
+  local existing
+  for existing in $PROFILE_NAMES; do
+    if [[ "$existing" == "$name" ]]; then
+      return
+    fi
+  done
+  PROFILE_NAMES="$PROFILE_NAMES $name"
+}
+
+ensure_config_exists() {
+  if [[ ! -f "$CONFIG_PATH" ]]; then
+    echo "Error: config file not found at $CONFIG_PATH" >&2
+    echo "Create it first (see cli/README.md for an example)." >&2
+    exit 3
+  fi
+}
+
+load_config() {
+  ensure_config_exists
+
+  local section=""
+  local line raw key value profile_name
+
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    line="${raw%%#*}"
+    line="$(trim "$line")"
+    [[ -z "$line" ]] && continue
+
+    if [[ "$line" =~ ^\[(.+)\]$ ]]; then
+      section="${BASH_REMATCH[1]}"
+      continue
+    fi
+
+    if [[ ! "$line" =~ ^([A-Za-z0-9_.-]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+      continue
+    fi
+
+    key="${BASH_REMATCH[1]}"
+    value="$(strip_quotes "${BASH_REMATCH[2]}")"
+
+    case "$section" in
+      bakker)
+        case "$key" in
+          api_url) BAKKER_API_URL="$value" ;;
+          container) BAKKER_CONTAINER="$value" ;;
+          timeout_seconds) REQUEST_TIMEOUT="$value" ;;
+        esac
+        ;;
+      defaults)
+        case "$key" in
+          output) DEFAULT_OUTPUT="$value" ;;
+          confirm_import) DEFAULT_CONFIRM_IMPORT="$value" ;;
+        esac
+        ;;
+      profiles.*)
+        profile_name="${section#profiles.}"
+        add_profile_name "$profile_name"
+        case "$key" in
+          host|port|user|database)
+            set_profile_value "$profile_name" "$key" "$value"
+            ;;
+        esac
+        ;;
+    esac
+  done < "$CONFIG_PATH"
+
+  [[ -z "$BAKKER_API_URL" ]] && BAKKER_API_URL="http://localhost:3500"
+  [[ -z "$BAKKER_CONTAINER" ]] && BAKKER_CONTAINER="bakker"
+  [[ -z "$REQUEST_TIMEOUT" ]] && REQUEST_TIMEOUT="30"
+  [[ -z "$DEFAULT_OUTPUT" ]] && DEFAULT_OUTPUT="table"
+  [[ -z "$DEFAULT_CONFIRM_IMPORT" ]] && DEFAULT_CONFIRM_IMPORT="true"
+
+  if [[ -n "$OVERRIDE_API_URL" ]]; then
+    BAKKER_API_URL="$OVERRIDE_API_URL"
+  fi
+  if [[ -n "$OVERRIDE_CONTAINER" ]]; then
+    BAKKER_CONTAINER="$OVERRIDE_CONTAINER"
+  fi
+  if [[ -n "$OVERRIDE_TIMEOUT" ]]; then
+    REQUEST_TIMEOUT="$OVERRIDE_TIMEOUT"
+  fi
+  if [[ -n "$OVERRIDE_OUTPUT" ]]; then
+    DEFAULT_OUTPUT="$OVERRIDE_OUTPUT"
+  fi
+
+  return 0
+}
+
+require_cmd() {
+  local cmd="$1"
+  command -v "$cmd" >/dev/null 2>&1 || {
+    echo "Error: required command not found: $cmd" >&2
+    exit 3
+  }
+}
+
+require_runtime() {
+  require_cmd curl
+  require_cmd docker
+}
+
+get_auth_token() {
+  if [[ -n "${BAKKER_AUTH_TOKEN:-}" ]]; then
+    printf '%s' "$BAKKER_AUTH_TOKEN"
+    return
+  fi
+
+  if [[ -t 0 ]]; then
+    local token
+    read -r -s -p "Enter Bakker API token: " token
+    echo
+    if [[ -z "$token" ]]; then
+      echo "Error: token is required." >&2
+      exit 3
+    fi
+    printf '%s' "$token"
+    return
+  fi
+
+  echo "Error: BAKKER_AUTH_TOKEN is not set and no interactive TTY is available." >&2
+  exit 3
+}
+
+api_request() {
+  local method="$1"
+  local path="$2"
+  local token="$3"
+  local tmp_file status
+
+  tmp_file="$(mktemp)"
+  status="$(curl -sS -o "$tmp_file" -w '%{http_code}' --max-time "$REQUEST_TIMEOUT" \
+    -H "Authorization: Bearer $token" \
+    -X "$method" \
+    "$BAKKER_API_URL$path")" || {
+      rm -f "$tmp_file"
+      echo "Error: request failed: $method $BAKKER_API_URL$path" >&2
+      exit 4
+    }
+
+  if [[ "$status" -ge 400 ]]; then
+    echo "Error: API returned HTTP $status for $method $path" >&2
+    cat "$tmp_file" >&2
+    rm -f "$tmp_file"
+    exit 4
+  fi
+
+  cat "$tmp_file"
+  rm -f "$tmp_file"
+}
+
+json_transform_with_bakker_bun() {
+  local js_code="$1"
+  docker exec -i "$BAKKER_CONTAINER" bun -e "$js_code"
+}
+
+url_encode_with_bakker_bun() {
+  local raw="$1"
+  docker exec -i "$BAKKER_CONTAINER" bun -e 'const fs=require("fs"); const s=fs.readFileSync(0, "utf8"); process.stdout.write(encodeURIComponent(s));' <<<"$raw"
+}
+
+print_backups_table() {
+  local json_data="$1"
+  local filter_db="$2"
+  local latest_only="$3"
+
+  local js_code
+  js_code='const fs=require("fs");
+const input=fs.readFileSync(0,"utf8");
+const dbFilter=process.env.DB_FILTER||"";
+const latest=(process.env.LATEST_ONLY||"false")==="true";
+let parsed={};
+try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
+const rows=[];
+for (const [db,list] of Object.entries(parsed)) {
+  if (dbFilter && db!==dbFilter) continue;
+  if (!Array.isArray(list)) continue;
+  const items=latest?list.slice(0,1):list;
+  for (const item of items) {
+    rows.push({
+      db,
+      date:item?.date||"",
+      size:item?.sizeHuman||item?.sizeMB||"",
+      file:item?.filename||""
+    });
+  }
+}
+rows.sort((a,b)=>{
+  if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
+  return a.db.localeCompare(b.db);
+});
+console.log("DATABASE\tDATE\tSIZE\tFILE");
+for (const r of rows) {
+  console.log(`${r.db}\t${r.date}\t${r.size}\t${r.file}`);
+}'
+
+  while IFS=$'\t' read -r col1 col2 col3 col4; do
+    printf '%-20s %-19s %-10s %s\n' "$col1" "$col2" "$col3" "$col4"
+  done < <(
+    printf '%s' "$json_data" | DB_FILTER="$filter_db" LATEST_ONLY="$latest_only" json_transform_with_bakker_bun "$js_code"
+  )
+}
+
+resolve_latest_backup_file() {
+  local json_data="$1"
+  local db_name="$2"
+  local js_code
+
+  js_code='const fs=require("fs");
+const input=fs.readFileSync(0,"utf8");
+const db=process.env.DB_NAME||"";
+let parsed={};
+try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
+if (!db || !Array.isArray(parsed[db]) || parsed[db].length===0) {
+  process.exit(2);
+}
+const file=parsed[db][0]?.filename||"";
+if (!file) process.exit(2);
+process.stdout.write(file);'
+
+  printf '%s' "$json_data" | DB_NAME="$db_name" json_transform_with_bakker_bun "$js_code"
+}
+
+require_profile() {
+  local profile="$1"
+  local found="false"
+  local p
+  for p in $PROFILE_NAMES; do
+    if [[ "$p" == "$profile" ]]; then
+      found="true"
+      break
+    fi
+  done
+
+  if [[ "$found" != "true" ]]; then
+    echo "Error: profile '$profile' not found in $CONFIG_PATH" >&2
+    exit 3
+  fi
+
+  local host port user database
+  host="$(get_profile_value "$profile" host)"
+  port="$(get_profile_value "$profile" port)"
+  user="$(get_profile_value "$profile" user)"
+  database="$(get_profile_value "$profile" database)"
+
+  if [[ -z "$host" ]]; then
+    echo "Error: profile '$profile' missing host" >&2
+    exit 3
+  fi
+  if [[ -z "$port" ]]; then
+    echo "Error: profile '$profile' missing port" >&2
+    exit 3
+  fi
+  if [[ -z "$user" ]]; then
+    echo "Error: profile '$profile' missing user" >&2
+    exit 3
+  fi
+  if [[ -z "$database" ]]; then
+    echo "Error: profile '$profile' missing database" >&2
+    exit 3
+  fi
+
+  return 0
+}
+
+command_backups_list() {
+  local filter_db=""
+  local latest_only="false"
+  local output_mode="$DEFAULT_OUTPUT"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --db)
+        [[ $# -lt 2 ]] && { echo "Error: --db requires a value" >&2; exit 2; }
+        filter_db="$2"
+        shift 2
+        ;;
+      --latest)
+        latest_only="true"
+        shift
+        ;;
+      --json)
+        output_mode="json"
+        shift
+        ;;
+      --help|-h)
+        usage_backups
+        return 0
+        ;;
+      *)
+        echo "Error: unknown option for backups list: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  local token json_data
+  token="$(get_auth_token)"
+  json_data="$(api_request GET "/api/backups" "$token")"
+
+  if [[ "$output_mode" == "json" ]]; then
+    printf '%s\n' "$json_data"
+    return 0
+  fi
+
+  print_backups_table "$json_data" "$filter_db" "$latest_only"
+}
+
+confirm_if_needed() {
+  local prompt="$1"
+  local no_confirm="$2"
+
+  if [[ "$no_confirm" == "true" ]]; then
+    return 0
+  fi
+
+  if [[ "$DEFAULT_CONFIRM_IMPORT" == "false" ]]; then
+    return 0
+  fi
+
+  local answer
+  read -r -p "$prompt [y/N]: " answer
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    *)
+      echo "Aborted."
+      exit 5
+      ;;
+  esac
+}
+
+prompt_db_password() {
+  local profile="$1"
+  local password
+  read -r -s -p "Enter destination DB password for profile '$profile': " password
+  echo
+  if [[ -z "$password" ]]; then
+    echo "Error: destination DB password is required." >&2
+    exit 3
+  fi
+  printf '%s' "$password"
+}
+
+profile_password_env_name() {
+  local profile="$1"
+  local upper sanitized
+  upper="$(printf '%s' "$profile" | tr '[:lower:]' '[:upper:]')"
+  sanitized="$(printf '%s' "$upper" | tr -c 'A-Z0-9' '_')"
+  printf '%s_DB_PASS' "$sanitized"
+}
+
+get_profile_db_password() {
+  local profile="$1"
+  local env_name env_value
+  env_name="$(profile_password_env_name "$profile")"
+  env_value="${!env_name-}"
+
+  if [[ -n "$env_value" ]]; then
+    echo "Using destination DB password from \$$env_name for profile '$profile'." >&2
+    printf '%s' "$env_value"
+    return 0
+  fi
+
+  prompt_db_password "$profile"
+}
+
+connectivity_check() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local database="$4"
+  local password="$5"
+
+  docker exec -i \
+    -e MYSQL_PWD="$password" \
+    "$BAKKER_CONTAINER" \
+    mariadb -h "$host" -P "$port" -u "$user" -D "$database" -e "SELECT 1;" >/dev/null
+}
+
+run_import() {
+  local profile=""
+  local filename=""
+  local db_name=""
+  local latest_only="false"
+  local no_confirm="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)
+        [[ $# -lt 2 ]] && { echo "Error: --profile requires a value" >&2; exit 2; }
+        profile="$2"
+        shift 2
+        ;;
+      --file)
+        [[ $# -lt 2 ]] && { echo "Error: --file requires a value" >&2; exit 2; }
+        filename="$2"
+        shift 2
+        ;;
+      --db)
+        [[ $# -lt 2 ]] && { echo "Error: --db requires a value" >&2; exit 2; }
+        db_name="$2"
+        shift 2
+        ;;
+      --latest)
+        latest_only="true"
+        shift
+        ;;
+      --yes)
+        no_confirm="true"
+        shift
+        ;;
+      --help|-h)
+        usage_import
+        return 0
+        ;;
+      *)
+        echo "Error: unknown option for import: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  [[ -z "$profile" ]] && { echo "Error: --profile is required" >&2; exit 2; }
+
+  if [[ -n "$filename" && -n "$db_name" ]]; then
+    echo "Error: use either --file or --db --latest, not both." >&2
+    exit 2
+  fi
+
+  if [[ -z "$filename" ]]; then
+    if [[ -z "$db_name" || "$latest_only" != "true" ]]; then
+      echo "Error: import requires --file OR --db <name> --latest." >&2
+      exit 2
+    fi
+  fi
+
+  require_profile "$profile"
+
+  local host port user database
+  host="$(get_profile_value "$profile" host)"
+  port="$(get_profile_value "$profile" port)"
+  user="$(get_profile_value "$profile" user)"
+  database="$(get_profile_value "$profile" database)"
+
+  local token backups_json
+  token="$(get_auth_token)"
+
+  if [[ -z "$filename" ]]; then
+    backups_json="$(api_request GET "/api/backups" "$token")"
+    if ! filename="$(resolve_latest_backup_file "$backups_json" "$db_name")"; then
+      echo "Error: no backups found for database '$db_name'." >&2
+      exit 4
+    fi
+  fi
+
+  local db_password
+  db_password="$(get_profile_db_password "$profile")"
+
+  echo "Checking destination connectivity for profile '$profile'..."
+  if ! connectivity_check "$host" "$port" "$user" "$database" "$db_password"; then
+    echo "Error: failed to connect to destination DB ($user@$host:$port/$database)." >&2
+    exit 5
+  fi
+
+  confirm_if_needed "Import backup '$filename' into profile '$profile' ($user@$host:$port/$database)?" "$no_confirm"
+
+  echo "Starting import of '$filename' into '$profile'..."
+
+  local encoded_filename
+  encoded_filename="$(url_encode_with_bakker_bun "$filename")"
+
+  curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
+    -H "Authorization: Bearer $token" \
+    "$BAKKER_API_URL/api/backups/$encoded_filename" \
+    | docker exec -i \
+        -e MYSQL_PWD="$db_password" \
+        -e DEST_HOST="$host" \
+        -e DEST_PORT="$port" \
+        -e DEST_USER="$user" \
+        -e DEST_DB="$database" \
+        "$BAKKER_CONTAINER" \
+        sh -lc 'gunzip | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
+
+  echo "Import completed successfully."
+}
+
+profiles_list() {
+  local p
+  if [[ -z "$PROFILE_NAMES" ]]; then
+    echo "No profiles defined in $CONFIG_PATH"
+    return 0
+  fi
+
+  for p in $PROFILE_NAMES; do
+    printf '%s\n' "$p"
+  done
+}
+
+profiles_show() {
+  local profile="${1:-}"
+  [[ -z "$profile" ]] && { echo "Error: profile name is required" >&2; exit 2; }
+
+  require_profile "$profile"
+
+  echo "profile = $profile"
+  echo "host = $(get_profile_value "$profile" host)"
+  echo "port = $(get_profile_value "$profile" port)"
+  echo "user = $(get_profile_value "$profile" user)"
+  echo "database = $(get_profile_value "$profile" database)"
+}
+
+doctor() {
+  echo "Running doctor checks..."
+
+  require_runtime
+  echo "- curl: ok"
+  echo "- docker: ok"
+
+  if [[ -f "$CONFIG_PATH" ]]; then
+    echo "- config: ok ($CONFIG_PATH)"
+  else
+    echo "- config: missing ($CONFIG_PATH)"
+    exit 3
+  fi
+
+  if docker inspect "$BAKKER_CONTAINER" >/dev/null 2>&1; then
+    echo "- container '$BAKKER_CONTAINER': found"
+  else
+    echo "- container '$BAKKER_CONTAINER': not found"
+    exit 3
+  fi
+
+  if docker exec "$BAKKER_CONTAINER" true >/dev/null 2>&1; then
+    echo "- container exec: ok"
+  else
+    echo "- container exec: failed"
+    exit 3
+  fi
+
+  local token
+  if [[ -n "${BAKKER_AUTH_TOKEN:-}" ]]; then
+    token="$BAKKER_AUTH_TOKEN"
+  else
+    echo "- token: not set in env (interactive token will be required for API commands)"
+    return 0
+  fi
+
+  if api_request GET "/api/auth-required" "$token" >/dev/null; then
+    echo "- API auth: ok"
+  else
+    echo "- API auth: failed"
+    exit 4
+  fi
+}
+
+parse_global_options() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config)
+        [[ $# -lt 2 ]] && { echo "Error: --config requires a value" >&2; exit 2; }
+        CONFIG_PATH="$2"
+        shift 2
+        ;;
+      --api-url)
+        [[ $# -lt 2 ]] && { echo "Error: --api-url requires a value" >&2; exit 2; }
+        OVERRIDE_API_URL="$2"
+        shift 2
+        ;;
+      --container)
+        [[ $# -lt 2 ]] && { echo "Error: --container requires a value" >&2; exit 2; }
+        OVERRIDE_CONTAINER="$2"
+        shift 2
+        ;;
+      --timeout)
+        [[ $# -lt 2 ]] && { echo "Error: --timeout requires a value" >&2; exit 2; }
+        OVERRIDE_TIMEOUT="$2"
+        shift 2
+        ;;
+      --output)
+        [[ $# -lt 2 ]] && { echo "Error: --output requires a value" >&2; exit 2; }
+        OVERRIDE_OUTPUT="$2"
+        shift 2
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      help)
+        shift
+        command_help "${1:-}"
+        exit 0
+        ;;
+      version)
+        echo "$VERSION"
+        exit 0
+        ;;
+      backups|import|profiles|doctor)
+        break
+        ;;
+      *)
+        echo "Error: unknown global option or command: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  REMAINING_ARGS=("$@")
+}
+
+main() {
+  require_runtime
+  parse_global_options "$@"
+  set -- "${REMAINING_ARGS[@]}"
+
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 2
+  fi
+
+  local cmd="$1"
+  shift
+
+  # Help paths should work even when config file is missing.
+  case "$cmd" in
+    backups)
+      if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" || -z "${1:-}" ]]; then
+        usage_backups
+        return 0
+      fi
+      if [[ "${1:-}" == "list" && ( "${2:-}" == "--help" || "${2:-}" == "-h" ) ]]; then
+        usage_backups
+        return 0
+      fi
+      ;;
+    import)
+      if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+        usage_import
+        return 0
+      fi
+      ;;
+    profiles)
+      if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" || -z "${1:-}" ]]; then
+        usage_profiles
+        return 0
+      fi
+      ;;
+    doctor)
+      if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
+        usage_doctor
+        return 0
+      fi
+      ;;
+  esac
+
+  load_config
+
+  case "$cmd" in
+    backups)
+      local sub="${1:-}"
+      if [[ "$sub" != "list" ]]; then
+        echo "Error: expected 'backups list'" >&2
+        exit 2
+      fi
+      shift
+      command_backups_list "$@"
+      ;;
+    import)
+      run_import "$@"
+      ;;
+    profiles)
+      local sub="${1:-}"
+      shift || true
+      case "$sub" in
+        list) profiles_list ;;
+        show) profiles_show "${1:-}" ;;
+        *)
+          echo "Error: profiles command must be 'list' or 'show <name>'" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    doctor)
+      doctor
+      ;;
+    *)
+      echo "Error: unknown command: $cmd" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
