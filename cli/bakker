@@ -300,8 +300,19 @@ get_auth_token() {
   fi
 
   token="$(trim "$token")"
-  token="${token//$'\r'/}"
-  token="${token//$'\n'/}"
+  # Remove common terminal paste wrappers/control chars that can break auth headers.
+  token="${token//$'\e[200~'/}"
+  token="${token//$'\e[201~'/}"
+  token="$(printf '%s' "$token" | tr -d '\r\n' | tr -d '[:cntrl:]')"
+  token="$(trim "$token")"
+
+  # Strip optional surrounding quotes if pasted as a quoted value.
+  if [[ "$token" =~ ^\"(.*)\"$ ]]; then
+    token="${BASH_REMATCH[1]}"
+  elif [[ "$token" =~ ^\'(.*)\'$ ]]; then
+    token="${BASH_REMATCH[1]}"
+  fi
+
   if [[ "$token" == [Bb]earer\ * ]]; then
     token="${token#* }"
   fi
@@ -348,6 +359,7 @@ api_request() {
     echo "Request URL: $request_url" >&2
     if [[ "$status" -eq 400 ]]; then
       echo "Hint: verify [bakker].api_url in config and token format." >&2
+      echo "Hint: try exporting BAKKER_AUTH_TOKEN to avoid hidden paste chars in interactive input." >&2
     fi
     cat "$tmp_file" >&2
     rm -f "$tmp_file"
