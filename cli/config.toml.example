@@ -1,6 +1,7 @@
 [bakker]
 api_url = "http://localhost:3500"
-container = "bakker"
+image = "sebaswouters/bakker:latest"
+# docker_network = "host"
 timeout_seconds = 30
 
 [defaults]

@@ -5,13 +5,15 @@ VERSION="0.1.0"
 
 CONFIG_PATH="${BAKKER_CONFIG:-$HOME/.config/bakker/config.toml}"
 BAKKER_API_URL=""
-BAKKER_CONTAINER=""
+BAKKER_IMAGE=""
+BAKKER_DOCKER_NETWORK=""
 REQUEST_TIMEOUT=""
 DEFAULT_OUTPUT=""
 DEFAULT_CONFIRM_IMPORT=""
 
 OVERRIDE_API_URL=""
-OVERRIDE_CONTAINER=""
+OVERRIDE_IMAGE=""
+OVERRIDE_DOCKER_NETWORK=""
 OVERRIDE_TIMEOUT=""
 OVERRIDE_OUTPUT=""
 
@@ -26,7 +28,8 @@ Usage:
 Global options:
   --config <path>        Path to config.toml
   --api-url <url>        Override Bakker API URL
-  --container <name>     Override docker container name
+  --image <ref>          Override tooling image (default: sebaswouters/bakker:latest)
+  --docker-network <n>   Optional docker network for image runs
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
   --help                 Show this help
@@ -223,7 +226,8 @@ load_config() {
       bakker)
         case "$key" in
           api_url) BAKKER_API_URL="$value" ;;
-          container) BAKKER_CONTAINER="$value" ;;
+          image) BAKKER_IMAGE="$value" ;;
+          docker_network) BAKKER_DOCKER_NETWORK="$value" ;;
           timeout_seconds) REQUEST_TIMEOUT="$value" ;;
         esac
         ;;
@@ -246,7 +250,7 @@ load_config() {
   done < "$CONFIG_PATH"
 
   [[ -z "$BAKKER_API_URL" ]] && BAKKER_API_URL="http://localhost:3500"
-  [[ -z "$BAKKER_CONTAINER" ]] && BAKKER_CONTAINER="bakker"
+  [[ -z "$BAKKER_IMAGE" ]] && BAKKER_IMAGE="sebaswouters/bakker:latest"
   [[ -z "$REQUEST_TIMEOUT" ]] && REQUEST_TIMEOUT="30"
   [[ -z "$DEFAULT_OUTPUT" ]] && DEFAULT_OUTPUT="table"
   [[ -z "$DEFAULT_CONFIRM_IMPORT" ]] && DEFAULT_CONFIRM_IMPORT="true"
@@ -254,8 +258,11 @@ load_config() {
   if [[ -n "$OVERRIDE_API_URL" ]]; then
     BAKKER_API_URL="$OVERRIDE_API_URL"
   fi
-  if [[ -n "$OVERRIDE_CONTAINER" ]]; then
-    BAKKER_CONTAINER="$OVERRIDE_CONTAINER"
+  if [[ -n "$OVERRIDE_IMAGE" ]]; then
+    BAKKER_IMAGE="$OVERRIDE_IMAGE"
+  fi
+  if [[ -n "$OVERRIDE_DOCKER_NETWORK" ]]; then
+    BAKKER_DOCKER_NETWORK="$OVERRIDE_DOCKER_NETWORK"
   fi
   if [[ -n "$OVERRIDE_TIMEOUT" ]]; then
     REQUEST_TIMEOUT="$OVERRIDE_TIMEOUT"
@@ -281,25 +288,40 @@ require_runtime() {
 }
 
 get_auth_token() {
+  local token
   if [[ -n "${BAKKER_AUTH_TOKEN:-}" ]]; then
-    printf '%s' "$BAKKER_AUTH_TOKEN"
-    return
-  fi
-
-  if [[ -t 0 ]]; then
-    local token
+    token="$BAKKER_AUTH_TOKEN"
+  elif [[ -t 0 ]]; then
     read -r -s -p "Enter Bakker API token: " token
     echo
-    if [[ -z "$token" ]]; then
-      echo "Error: token is required." >&2
-      exit 3
-    fi
-    printf '%s' "$token"
-    return
+  else
+    echo "Error: BAKKER_AUTH_TOKEN is not set and no interactive TTY is available." >&2
+    exit 3
   fi
 
-  echo "Error: BAKKER_AUTH_TOKEN is not set and no interactive TTY is available." >&2
-  exit 3
+  token="$(trim "$token")"
+  token="${token//$'\r'/}"
+  token="${token//$'\n'/}"
+  if [[ "$token" == [Bb]earer\ * ]]; then
+    token="${token#* }"
+  fi
+
+  if [[ -z "$token" ]]; then
+    echo "Error: token is required." >&2
+    exit 3
+  fi
+
+  printf '%s' "$token"
+}
+
+normalize_api_url() {
+  local url="$1"
+  url="$(trim "$url")"
+  url="${url%/}"
+  if [[ "$url" == */api ]]; then
+    url="${url%/api}"
+  fi
+  printf '%s' "$url"
 }
 
 api_request() {
@@ -309,17 +331,24 @@ api_request() {
   local tmp_file status
 
   tmp_file="$(mktemp)"
+  local request_url
+  request_url="$(normalize_api_url "$BAKKER_API_URL")$path"
+
   status="$(curl -sS -o "$tmp_file" -w '%{http_code}' --max-time "$REQUEST_TIMEOUT" \
     -H "Authorization: Bearer $token" \
     -X "$method" \
-    "$BAKKER_API_URL$path")" || {
+    "$request_url")" || {
       rm -f "$tmp_file"
-      echo "Error: request failed: $method $BAKKER_API_URL$path" >&2
+      echo "Error: request failed: $method $request_url" >&2
       exit 4
     }
 
   if [[ "$status" -ge 400 ]]; then
     echo "Error: API returned HTTP $status for $method $path" >&2
+    echo "Request URL: $request_url" >&2
+    if [[ "$status" -eq 400 ]]; then
+      echo "Hint: verify [bakker].api_url in config and token format." >&2
+    fi
     cat "$tmp_file" >&2
     rm -f "$tmp_file"
     exit 4
@@ -331,12 +360,20 @@ api_request() {
 
 json_transform_with_bakker_bun() {
   local js_code="$1"
-  docker exec -i "$BAKKER_CONTAINER" bun -e "$js_code"
+  docker_run_tool bun -e "$js_code"
 }
 
 url_encode_with_bakker_bun() {
   local raw="$1"
-  docker exec -i "$BAKKER_CONTAINER" bun -e 'const fs=require("fs"); const s=fs.readFileSync(0, "utf8"); process.stdout.write(encodeURIComponent(s));' <<<"$raw"
+  docker_run_tool bun -e 'const fs=require("fs"); const s=fs.readFileSync(0, "utf8"); process.stdout.write(encodeURIComponent(s));' <<<"$raw"
+}
+
+docker_run_tool() {
+  local network_args=()
+  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
+    network_args=(--network "$BAKKER_DOCKER_NETWORK")
+  fi
+  docker run --rm -i "${network_args[@]}" "$BAKKER_IMAGE" "$@"
 }
 
 print_backups_table() {
@@ -551,9 +588,14 @@ connectivity_check() {
   local database="$4"
   local password="$5"
 
-  docker exec -i \
+  local network_args=()
+  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
+    network_args=(--network "$BAKKER_DOCKER_NETWORK")
+  fi
+
+  docker run --rm "${network_args[@]}" \
     -e MYSQL_PWD="$password" \
-    "$BAKKER_CONTAINER" \
+    "$BAKKER_IMAGE" \
     mariadb -h "$host" -P "$port" -u "$user" -D "$database" -e "SELECT 1;" >/dev/null
 }
 
@@ -649,16 +691,21 @@ run_import() {
   local encoded_filename
   encoded_filename="$(url_encode_with_bakker_bun "$filename")"
 
+  local network_args=()
+  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
+    network_args=(--network "$BAKKER_DOCKER_NETWORK")
+  fi
+
   curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
     -H "Authorization: Bearer $token" \
-    "$BAKKER_API_URL/api/backups/$encoded_filename" \
-    | docker exec -i \
+    "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
+    | docker run --rm -i "${network_args[@]}" \
         -e MYSQL_PWD="$db_password" \
         -e DEST_HOST="$host" \
         -e DEST_PORT="$port" \
         -e DEST_USER="$user" \
         -e DEST_DB="$database" \
-        "$BAKKER_CONTAINER" \
+        "$BAKKER_IMAGE" \
         sh -lc 'gunzip | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
 
   echo "Import completed successfully."
@@ -703,17 +750,16 @@ doctor() {
     exit 3
   fi
 
-  if docker inspect "$BAKKER_CONTAINER" >/dev/null 2>&1; then
-    echo "- container '$BAKKER_CONTAINER': found"
+  if docker image inspect "$BAKKER_IMAGE" >/dev/null 2>&1; then
+    echo "- image '$BAKKER_IMAGE': available"
   else
-    echo "- container '$BAKKER_CONTAINER': not found"
-    exit 3
+    echo "- image '$BAKKER_IMAGE': not present locally (will be pulled on first run)"
   fi
 
-  if docker exec "$BAKKER_CONTAINER" true >/dev/null 2>&1; then
-    echo "- container exec: ok"
+  if docker run --rm "$BAKKER_IMAGE" true >/dev/null 2>&1; then
+    echo "- image run: ok"
   else
-    echo "- container exec: failed"
+    echo "- image run: failed (check image name, network, and registry access)"
     exit 3
   fi
 
@@ -746,9 +792,14 @@ parse_global_options() {
         OVERRIDE_API_URL="$2"
         shift 2
         ;;
-      --container)
-        [[ $# -lt 2 ]] && { echo "Error: --container requires a value" >&2; exit 2; }
-        OVERRIDE_CONTAINER="$2"
+      --image)
+        [[ $# -lt 2 ]] && { echo "Error: --image requires a value" >&2; exit 2; }
+        OVERRIDE_IMAGE="$2"
+        shift 2
+        ;;
+      --docker-network)
+        [[ $# -lt 2 ]] && { echo "Error: --docker-network requires a value" >&2; exit 2; }
+        OVERRIDE_DOCKER_NETWORK="$2"
         shift 2
         ;;
       --timeout)

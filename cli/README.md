@@ -8,7 +8,7 @@
 
 - `docker`
 - `curl`
-- running Bakker container (default name: `bakker`)
+- access to Docker image `sebaswouters/bakker:latest` (or override image)
 
 ## Install
 
@@ -33,7 +33,8 @@ cp cli/config.toml.example ~/.config/bakker/config.toml
 
 Config includes all non-secret options:
 - Bakker URL
-- container name
+- tooling image
+- optional docker network for image runs
 - output/confirmation defaults
 - destination DB profiles
 
@@ -85,5 +86,5 @@ cli/bakker doctor
 All options can be configured in TOML and overridden by CLI flags:
 
 ```bash
-cli/bakker --config /path/config.toml --api-url http://127.0.0.1:3500 --container bakker backups list
+cli/bakker --config /path/config.toml --api-url http://127.0.0.1:3500 --image sebaswouters/bakker:latest backups list
 ```

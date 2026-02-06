@@ -105,6 +105,7 @@ A companion CLI is available at `cli/bakker`.
 It supports:
 - listing backups from the API
 - importing a backup into configured target DB profiles
+- running restore tooling via `docker run --rm` (no pre-running Bakker container required)
 
 Quick setup:
 
