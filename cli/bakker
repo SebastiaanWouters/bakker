@@ -440,10 +440,18 @@ const input=fs.readFileSync(0,"utf8");
 const db=process.env.DB_NAME||"";
 let parsed={};
 try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
-if (!db || !Array.isArray(parsed[db]) || parsed[db].length===0) {
+const keys=Object.keys(parsed||{});
+const normalizedDb=db.trim().toLowerCase();
+let selectedKey=db;
+if (!Array.isArray(parsed[selectedKey])) {
+  selectedKey=keys.find((k)=>k.trim().toLowerCase()===normalizedDb) || "";
+}
+if (!selectedKey || !Array.isArray(parsed[selectedKey]) || parsed[selectedKey].length===0) {
+  const available=keys.length>0?keys.join(", "):"(none)";
+  console.error(`No backups found for database key "${db}". Available: ${available}`);
   process.exit(2);
 }
-const file=parsed[db][0]?.filename||"";
+const file=parsed[selectedKey][0]?.filename||"";
 if (!file) process.exit(2);
 process.stdout.write(file);'
 
@@ -683,6 +691,7 @@ run_import() {
     backups_json="$(api_request GET "/api/backups" "$token")"
     if ! filename="$(resolve_latest_backup_file "$backups_json" "$db_name")"; then
       echo "Error: no backups found for database '$db_name'." >&2
+      echo "Tip: run 'bakker --config $CONFIG_PATH backups list --json' and copy the exact database key." >&2
       exit 4
     fi
   fi
