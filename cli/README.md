@@ -12,6 +12,14 @@
 
 ## Install
 
+One-liner install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SebastiaanWouters/bakker/main/install.sh | bash
+```
+
+Local repo install:
+
 ```bash
 chmod +x cli/bakker
 ```
@@ -105,6 +113,8 @@ cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.
 `import` accepts either:
 - a backup ID from `backup list`, or
 - a local `.sql` / `.sql.gz` file path (relative paths are resolved from your current directory).
+
+Imports run with a compatibility SQL mode that strips `NO_BACKSLASH_ESCAPES` for the import session, which prevents parser errors on standard dump escaping.
 
 Profile commands:
 

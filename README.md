@@ -115,7 +115,13 @@ It supports:
 - importing a backup into configured target DB profiles
 - running restore tooling via `docker run --rm` (no pre-running Bakker container required)
 
-Quick setup:
+Install (one-liner):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SebastiaanWouters/bakker/main/install.sh | bash
+```
+
+Local repo setup (without install script):
 
 ```bash
 chmod +x cli/bakker
@@ -168,7 +174,7 @@ On each Git tag push (`vX.Y.Z`), CI publishes:
 
 ## How Backups Work
 
-Backups are created by `/app/scripts/backup.sh` using `mariadb-dump` and gzip. Each backup is saved as:
+Backups are created by `/app/scripts/backup.sh` using `mysqldump`, UTF-8/hex-safe dump flags, and gzip. Each backup is saved as:
 
 ```
 /data/backups/<config>_YYYYMMDD_HHMMSS.sql.gz

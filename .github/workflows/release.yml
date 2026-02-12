@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n cli/bakker scripts/backup.sh scripts/cleanup.sh entrypoint.sh
+          bash -n install.sh cli/bakker scripts/backup.sh scripts/cleanup.sh entrypoint.sh
 
       - name: Validate docker compose
         shell: bash

@@ -107,26 +107,40 @@ done
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.sql.gz"
 
-# Execute mariadb-dump
-MYSQL_PWD="$DB_PASSWORD" mariadb-dump \
-    -h "$DB_HOST" \
-    -P "$DB_PORT" \
-    -u "$DB_USER" \
-    "$DB_NAME" \
-    --single-transaction \
-    --quick \
-    --skip-lock-tables \
-    --no-tablespaces \
-    --extended-insert \
-    --disable-keys \
-    --max-allowed-packet=512M \
-    "${IGNORE_FLAGS[@]}" \
-    | gzip > "$DUMP_FILE"
+# Use mysqldump only for deterministic, MySQL-compatible output.
+DUMP_CMD="mysqldump"
+if ! command -v "$DUMP_CMD" >/dev/null 2>&1; then
+    error "No dump command found: mysqldump"
+fi
 
-DUMP_EXIT=${PIPESTATUS[0]}
-if [[ $DUMP_EXIT -ne 0 ]]; then
+DUMP_ARGS=(
+    -h "$DB_HOST"
+    -P "$DB_PORT"
+    -u "$DB_USER"
+    --single-transaction
+    --quick
+    --skip-lock-tables
+    --no-tablespaces
+    --extended-insert
+    --disable-keys
+    --hex-blob
+    --default-character-set=utf8mb4
+    --max-allowed-packet=512M
+    "$DB_NAME"
+    "${IGNORE_FLAGS[@]}"
+)
+
+log "Using dump command: $DUMP_CMD"
+set +e
+MYSQL_PWD="$DB_PASSWORD" "$DUMP_CMD" "${DUMP_ARGS[@]}" | gzip -c > "$DUMP_FILE"
+PIPE_STATUS=("${PIPESTATUS[@]}")
+set -e
+
+DUMP_EXIT=${PIPE_STATUS[0]:-1}
+GZIP_EXIT=${PIPE_STATUS[1]:-1}
+if [[ $DUMP_EXIT -ne 0 || $GZIP_EXIT -ne 0 ]]; then
     rm -f "$DUMP_FILE"
-    error "Database export failed (exit code: $DUMP_EXIT). Check credentials, network connectivity, and disk space."
+    error "Database export failed (dump exit: $DUMP_EXIT, gzip exit: $GZIP_EXIT). Check credentials, connectivity, and disk space."
 fi
 
 FILE_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE" 2>/dev/null || echo "0")
