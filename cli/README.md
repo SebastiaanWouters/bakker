@@ -59,12 +59,21 @@ Config includes all non-secret options:
 
 Set `[defaults].profile` to avoid repeating `--profile` on every import.
 
-Passwords are never read from config.
-
 For import destination passwords:
-- The CLI first checks env var `<PROFILE>_DB_PASS` (profile uppercased, non-alphanumeric characters converted to `_`).
+- The CLI checks, in order:
+  1) env var `<PROFILE>_DB_PASS` (profile uppercased, non-alphanumeric characters converted to `_`)
+  2) `password` in `[profiles.<name>]` from config
+  3) interactive prompt
 - Example: profile `local-dev` -> `LOCAL_DEV_DB_PASS`.
-- If the env var is not set, the CLI prompts interactively.
+
+For local DBs on Linux (`host = "127.0.0.1"` or `localhost`), set:
+
+```toml
+[bakker]
+docker_network = "host"
+```
+
+This lets the Docker restore container reach your host-local database.
 
 ## Auth Token
 

@@ -11,13 +11,20 @@ confirm_import = true
 # profile = "local_dev"
 
 [profiles.local_dev]
+# If the destination DB is on your Linux host machine (localhost),
+# keep this as 127.0.0.1 and set [bakker].docker_network = "host" above.
+# On Docker Desktop, you can also use host.docker.internal.
 host = "127.0.0.1"
 port = 3306
 user = "restore_user"
 database = "app_local"
+# Optional: store destination DB password in config.
+# Env var <PROFILE>_DB_PASS still overrides this value.
+# password = "change-me"
 
 [profiles.staging]
 host = "staging-db.internal"
 port = 3306
 user = "restore_user"
 database = "app_staging"
+# password = "change-me"

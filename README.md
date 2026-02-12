@@ -133,7 +133,12 @@ Config lookup order for the CLI:
 Auth:
 - set `BAKKER_AUTH_TOKEN`, or
 - leave it unset and the CLI will ask interactively.
-- for import destination DB passwords, set `<PROFILE>_DB_PASS` (profile uppercased, non-alnum -> `_`), otherwise CLI prompts interactively.
+- for import destination DB passwords, lookup order is:
+  1) `<PROFILE>_DB_PASS` env var (profile uppercased, non-alnum -> `_`)
+  2) `password` in `[profiles.<name>]` in CLI config
+  3) interactive prompt
+
+For host-local DB imports on Linux (`127.0.0.1`/`localhost` profile host), set `docker_network = "host"` in `[bakker]` so the Docker restore container can reach the host DB.
 
 Examples:
 

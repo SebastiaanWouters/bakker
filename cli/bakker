@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.4"
+VERSION="0.2.5"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
@@ -85,8 +85,7 @@ Arguments:
 
 Notes:
   - For ID-based imports, Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
-  - Destination DB password can come from <PROFILE>_DB_PASS (e.g. LOCAL_DEV_DB_PASS).
-  - If that env var is not set, password is requested interactively.
+  - Destination DB password lookup order: <PROFILE>_DB_PASS env var, then profile password in config, then interactive prompt.
 USAGE
 }
 
@@ -140,6 +139,42 @@ trim() {
   s="${s#"${s%%[![:space:]]*}"}"
   s="${s%"${s##*[![:space:]]}"}"
   printf '%s' "$s"
+}
+
+strip_inline_comment() {
+  local s="$1"
+  local out=""
+  local i ch
+  local in_single="false"
+  local in_double="false"
+
+  for ((i = 0; i < ${#s}; i++)); do
+    ch="${s:i:1}"
+    if [[ "$ch" == "'" && "$in_double" == "false" ]]; then
+      if [[ "$in_single" == "true" ]]; then
+        in_single="false"
+      else
+        in_single="true"
+      fi
+      out+="$ch"
+      continue
+    fi
+    if [[ "$ch" == '"' && "$in_single" == "false" ]]; then
+      if [[ "$in_double" == "true" ]]; then
+        in_double="false"
+      else
+        in_double="true"
+      fi
+      out+="$ch"
+      continue
+    fi
+    if [[ "$ch" == "#" && "$in_single" == "false" && "$in_double" == "false" ]]; then
+      break
+    fi
+    out+="$ch"
+  done
+
+  printf '%s' "$out"
 }
 
 strip_quotes() {
@@ -231,7 +266,7 @@ load_config() {
   local line raw key value profile_name
 
   while IFS= read -r raw || [[ -n "$raw" ]]; do
-    line="${raw%%#*}"
+    line="$(strip_inline_comment "$raw")"
     line="$(trim "$line")"
     [[ -z "$line" ]] && continue
 
@@ -267,7 +302,7 @@ load_config() {
         profile_name="${section#profiles.}"
         add_profile_name "$profile_name"
         case "$key" in
-          host|port|user|database)
+          host|port|user|database|password)
             set_profile_value "$profile_name" "$key" "$value"
             ;;
         esac
@@ -411,10 +446,20 @@ url_encode_with_bakker_bun() {
 
 docker_run_tool() {
   local network_args=()
+  local env_args=()
+  local var_name
   if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
     network_args=(--network "$BAKKER_DOCKER_NETWORK")
   fi
-  docker run --rm -i "${network_args[@]}" "$BAKKER_IMAGE" "$@"
+
+  # json transforms run inside a container, so forward lookup/filter vars explicitly.
+  for var_name in BACKUP_ID DB_FILTER LATEST_ONLY; do
+    if [[ -v "$var_name" ]]; then
+      env_args+=(-e "$var_name=${!var_name}")
+    fi
+  done
+
+  docker run --rm -i "${network_args[@]}" "${env_args[@]}" "$BAKKER_IMAGE" "$@"
 }
 
 print_backups_table() {
@@ -661,7 +706,7 @@ profile_password_env_name() {
 
 get_profile_db_password() {
   local profile="$1"
-  local env_name env_value
+  local env_name env_value config_value
   env_name="$(profile_password_env_name "$profile")"
   env_value="${!env_name-}"
 
@@ -671,7 +716,23 @@ get_profile_db_password() {
     return 0
   fi
 
+  config_value="$(get_profile_value "$profile" password)"
+  if [[ -n "$config_value" ]]; then
+    echo "Using destination DB password from config profile '$profile'." >&2
+    printf '%s' "$config_value"
+    return 0
+  fi
+
   prompt_db_password "$profile"
+}
+
+print_connectivity_hint() {
+  local host="$1"
+  if [[ "$host" == "127.0.0.1" || "$host" == "localhost" || "$host" == "::1" ]]; then
+    echo "Hint: destination host '$host' is loopback inside the Docker restore container." >&2
+    echo "On Linux, set [bakker].docker_network = \"host\" to reach your host-local DB." >&2
+    echo "Alternative: use a host/IP reachable from Docker (or host.docker.internal where supported)." >&2
+  fi
 }
 
 connectivity_check() {
@@ -828,6 +889,7 @@ run_import() {
   echo "Checking destination connectivity for profile '$profile'..."
   if ! connectivity_check "$host" "$port" "$user" "$database" "$db_password"; then
     echo "Error: failed to connect to destination DB ($user@$host:$port/$database)." >&2
+    print_connectivity_hint "$host"
     exit 5
   fi
 
@@ -899,6 +961,11 @@ profiles_show() {
   echo "port = $(get_profile_value "$profile" port)"
   echo "user = $(get_profile_value "$profile" user)"
   echo "database = $(get_profile_value "$profile" database)"
+  if [[ -n "$(get_profile_value "$profile" password)" ]]; then
+    echo "password = [set in config]"
+  else
+    echo "password = [not set in config]"
+  fi
 }
 
 doctor() {
