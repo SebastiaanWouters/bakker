@@ -86,7 +86,7 @@ All `/api/*` routes require auth in production. Provide `Authorization: Bearer <
 
 - `GET /api/config` - read config
 - `PUT /api/config` - update config (validates cron + database references)
-- `GET /api/backups` - list backups grouped by database
+- `GET /api/backups` - list backups grouped by database (each backup includes globally unique `id`)
 - `GET /api/backups/:filename` - download backup
 - `DELETE /api/backups/:filename` - delete backup
 - `POST /api/backups/trigger` - manual backup trigger
@@ -125,7 +125,7 @@ Examples:
 ```bash
 cli/bakker backups list
 cli/bakker backups list --db prod --latest
-cli/bakker import --profile local_dev --db prod --latest
+cli/bakker import --profile local_dev --id 3
 ```
 
 For full CLI usage, see `cli/README.md`.

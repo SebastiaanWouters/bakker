@@ -10,12 +10,14 @@ BAKKER_DOCKER_NETWORK=""
 REQUEST_TIMEOUT=""
 DEFAULT_OUTPUT=""
 DEFAULT_CONFIRM_IMPORT=""
+DEFAULT_PROFILE=""
 
 OVERRIDE_API_URL=""
 OVERRIDE_IMAGE=""
 OVERRIDE_DOCKER_NETWORK=""
 OVERRIDE_TIMEOUT=""
 OVERRIDE_OUTPUT=""
+OVERRIDE_PROFILE=""
 
 PROFILE_NAMES=""
 
@@ -32,11 +34,12 @@ Global options:
   --docker-network <n>   Optional docker network for image runs
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
+  --profile <name>       Default destination profile for import
   --help                 Show this help
 
 Commands:
-  backups list [--db <name>] [--latest] [--json]               List backups from Bakker API
-  import --profile <name> (--file <filename> | --db <name> --latest) [--yes]  Import backup into destination DB
+  backups list [--db <name>] [--latest] [--json]               List backups from Bakker API (with IDs)
+  import [--profile <name>] (--id <number> | --file <filename>) [--yes]  Import backup into destination DB
   profiles list                                                 List configured destination profiles
   profiles show <name>                                          Show one destination profile
   doctor                                                        Run local and Bakker health checks
@@ -70,13 +73,12 @@ USAGE
 usage_import() {
   cat <<'USAGE'
 Usage:
-  bakker import --profile <name> (--file <filename> | --db <name> --latest) [--yes]
+  bakker import [--profile <name>] (--id <number> | --file <filename>) [--yes]
 
 Options:
-  --profile <name>  Destination profile from config.toml (required)
+  --profile <name>  Destination profile from config.toml (or [defaults].profile)
+  --id <number>     Backup ID from 'bakker backups list' (server-generated)
   --file <name>     Backup filename to import
-  --db <name>       Bakker database config name (requires --latest)
-  --latest          Resolve latest backup for --db
   --yes             Skip import confirmation prompt
   --help, -h        Show this help
 
@@ -235,6 +237,7 @@ load_config() {
         case "$key" in
           output) DEFAULT_OUTPUT="$value" ;;
           confirm_import) DEFAULT_CONFIRM_IMPORT="$value" ;;
+          profile) DEFAULT_PROFILE="$value" ;;
         esac
         ;;
       profiles.*)
@@ -269,6 +272,9 @@ load_config() {
   fi
   if [[ -n "$OVERRIDE_OUTPUT" ]]; then
     DEFAULT_OUTPUT="$OVERRIDE_OUTPUT"
+  fi
+  if [[ -n "$OVERRIDE_PROFILE" ]]; then
+    DEFAULT_PROFILE="$OVERRIDE_PROFILE"
   fi
 
   return 0
@@ -402,14 +408,83 @@ let parsed={};
 try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
 const rows=[];
 for (const [db,list] of Object.entries(parsed)) {
-  if (dbFilter && db!==dbFilter) continue;
   if (!Array.isArray(list)) continue;
-  const items=latest?list.slice(0,1):list;
-  for (const item of items) {
+  for (const item of list) {
+    const parsedId=Number(item?.id);
     rows.push({
+      id:Number.isInteger(parsedId) && parsedId>0 ? parsedId : null,
       db,
       date:item?.date||"",
       size:item?.sizeHuman||item?.sizeMB||"",
+      name:item?.filename||""
+    });
+  }
+}
+rows.sort((a,b)=>{
+  if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
+  return a.db.localeCompare(b.db);
+});
+if (rows.every((r)=>r.id===null)) {
+  rows.forEach((r, idx) => { r.id = idx + 1; });
+} else {
+  const used=new Set();
+  let fallbackId=1;
+  for (const row of rows) {
+    if (row.id!==null && !used.has(row.id)) {
+      used.add(row.id);
+      continue;
+    }
+    while (used.has(fallbackId)) fallbackId++;
+    row.id=fallbackId;
+    used.add(fallbackId);
+    fallbackId++;
+  }
+}
+const outputRows=[];
+const latestSeen=new Set();
+for (const row of rows) {
+  if (dbFilter && row.db!==dbFilter) continue;
+  if (latest) {
+    if (latestSeen.has(row.db)) continue;
+    latestSeen.add(row.db);
+  }
+  outputRows.push(row);
+}
+console.log("ID\tNAME\tDATE\tDB\tSIZE");
+for (const r of outputRows) {
+  console.log(`${r.id}\t${r.name}\t${r.date}\t${r.db}\t${r.size}`);
+}'
+
+  while IFS=$'\t' read -r col1 col2 col3 col4 col5; do
+    printf '%-5s %-48s %-19s %-20s %s\n' "$col1" "$col2" "$col3" "$col4" "$col5"
+  done < <(
+    printf '%s' "$json_data" | DB_FILTER="$filter_db" LATEST_ONLY="$latest_only" json_transform_with_bakker_bun "$js_code"
+  )
+}
+
+resolve_backup_file_by_id() {
+  local json_data="$1"
+  local backup_id="$2"
+  local js_code
+
+  js_code='const fs=require("fs");
+const input=fs.readFileSync(0,"utf8");
+const rawId=process.env.BACKUP_ID||"";
+const backupId=Number.parseInt(rawId, 10);
+if (!Number.isInteger(backupId) || backupId < 1) {
+  process.exit(2);
+}
+let parsed={};
+try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
+const rows=[];
+for (const [db,list] of Object.entries(parsed)) {
+  if (!Array.isArray(list)) continue;
+  for (const item of list) {
+    const parsedId=Number(item?.id);
+    rows.push({
+      id:Number.isInteger(parsedId) && parsedId>0 ? parsedId : null,
+      db,
+      date:item?.date||"",
       file:item?.filename||""
     });
   }
@@ -418,44 +493,27 @@ rows.sort((a,b)=>{
   if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
   return a.db.localeCompare(b.db);
 });
-console.log("DATABASE\tDATE\tSIZE\tFILE");
-for (const r of rows) {
-  console.log(`${r.db}\t${r.date}\t${r.size}\t${r.file}`);
-}'
-
-  while IFS=$'\t' read -r col1 col2 col3 col4; do
-    printf '%-20s %-19s %-10s %s\n' "$col1" "$col2" "$col3" "$col4"
-  done < <(
-    printf '%s' "$json_data" | DB_FILTER="$filter_db" LATEST_ONLY="$latest_only" json_transform_with_bakker_bun "$js_code"
-  )
+if (rows.every((r)=>r.id===null)) {
+  rows.forEach((row, idx) => { row.id = idx + 1; });
+} else {
+  const used=new Set();
+  let fallbackId=1;
+  for (const row of rows) {
+    if (row.id!==null && !used.has(row.id)) {
+      used.add(row.id);
+      continue;
+    }
+    while (used.has(fallbackId)) fallbackId++;
+    row.id=fallbackId;
+    used.add(fallbackId);
+    fallbackId++;
+  }
 }
+const selected=rows.find((row) => row.id===backupId);
+if (!selected || !selected.file) process.exit(2);
+process.stdout.write(`${selected.file}\t${selected.db}`);'
 
-resolve_latest_backup_file() {
-  local json_data="$1"
-  local db_name="$2"
-  local js_code
-
-  js_code='const fs=require("fs");
-const input=fs.readFileSync(0,"utf8");
-const db=process.env.DB_NAME||"";
-let parsed={};
-try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
-const keys=Object.keys(parsed||{});
-const normalizedDb=db.trim().toLowerCase();
-let selectedKey=db;
-if (!Array.isArray(parsed[selectedKey])) {
-  selectedKey=keys.find((k)=>k.trim().toLowerCase()===normalizedDb) || "";
-}
-if (!selectedKey || !Array.isArray(parsed[selectedKey]) || parsed[selectedKey].length===0) {
-  const available=keys.length>0?keys.join(", "):"(none)";
-  console.error(`No backups found for database key "${db}". Available: ${available}`);
-  process.exit(2);
-}
-const file=parsed[selectedKey][0]?.filename||"";
-if (!file) process.exit(2);
-process.stdout.write(file);'
-
-  printf '%s' "$json_data" | DB_NAME="$db_name" json_transform_with_bakker_bun "$js_code"
+  printf '%s' "$json_data" | BACKUP_ID="$backup_id" json_transform_with_bakker_bun "$js_code"
 }
 
 require_profile() {
@@ -620,10 +678,9 @@ connectivity_check() {
 }
 
 run_import() {
-  local profile=""
+  local profile="$DEFAULT_PROFILE"
   local filename=""
-  local db_name=""
-  local latest_only="false"
+  local backup_id=""
   local no_confirm="false"
 
   while [[ $# -gt 0 ]]; do
@@ -638,14 +695,15 @@ run_import() {
         filename="$2"
         shift 2
         ;;
-      --db)
-        [[ $# -lt 2 ]] && { echo "Error: --db requires a value" >&2; exit 2; }
-        db_name="$2"
+      --id)
+        [[ $# -lt 2 ]] && { echo "Error: --id requires a value" >&2; exit 2; }
+        backup_id="$2"
         shift 2
         ;;
-      --latest)
-        latest_only="true"
-        shift
+      --db|--latest)
+        echo "Error: --db/--latest is no longer supported for import." >&2
+        echo "Use 'bakker backups list' to find an ID, then run 'bakker import --id <number>'." >&2
+        exit 2
         ;;
       --yes)
         no_confirm="true"
@@ -662,16 +720,21 @@ run_import() {
     esac
   done
 
-  [[ -z "$profile" ]] && { echo "Error: --profile is required" >&2; exit 2; }
+  [[ -z "$profile" ]] && { echo "Error: --profile is required (or set [defaults].profile / global --profile)" >&2; exit 2; }
 
-  if [[ -n "$filename" && -n "$db_name" ]]; then
-    echo "Error: use either --file or --db --latest, not both." >&2
+  if [[ -n "$filename" && -n "$backup_id" ]]; then
+    echo "Error: use either --file or --id, not both." >&2
     exit 2
   fi
 
-  if [[ -z "$filename" ]]; then
-    if [[ -z "$db_name" || "$latest_only" != "true" ]]; then
-      echo "Error: import requires --file OR --db <name> --latest." >&2
+  if [[ -z "$filename" && -z "$backup_id" ]]; then
+    echo "Error: import requires --id <number> OR --file <filename>." >&2
+    exit 2
+  fi
+
+  if [[ -n "$backup_id" ]]; then
+    if [[ ! "$backup_id" =~ ^[0-9]+$ ]] || [[ "$backup_id" -lt 1 ]]; then
+      echo "Error: --id must be a positive integer from 'bakker backups list'." >&2
       exit 2
     fi
   fi
@@ -684,16 +747,23 @@ run_import() {
   user="$(get_profile_value "$profile" user)"
   database="$(get_profile_value "$profile" database)"
 
-  local token backups_json
+  local token backups_json selected_db
   token="$(get_auth_token)"
 
-  if [[ -z "$filename" ]]; then
+  if [[ -n "$backup_id" ]]; then
     backups_json="$(api_request GET "/api/backups" "$token")"
-    if ! filename="$(resolve_latest_backup_file "$backups_json" "$db_name")"; then
-      echo "Error: no backups found for database '$db_name'." >&2
-      echo "Tip: run 'bakker --config $CONFIG_PATH backups list --json' and copy the exact database key." >&2
+    local resolved
+    if ! resolved="$(resolve_backup_file_by_id "$backups_json" "$backup_id")"; then
+      echo "Error: no backup found for ID '$backup_id'." >&2
+      echo "Tip: run 'bakker --config $CONFIG_PATH backups list' and choose an ID from the first column." >&2
       exit 4
     fi
+    IFS=$'\t' read -r filename selected_db <<<"$resolved"
+    if [[ -z "$filename" ]]; then
+      echo "Error: backup ID '$backup_id' resolved to an empty filename." >&2
+      exit 4
+    fi
+    echo "Resolved backup ID $backup_id to '$filename' (database '$selected_db')."
   fi
 
   local db_password
@@ -831,6 +901,11 @@ parse_global_options() {
       --output)
         [[ $# -lt 2 ]] && { echo "Error: --output requires a value" >&2; exit 2; }
         OVERRIDE_OUTPUT="$2"
+        shift 2
+        ;;
+      --profile)
+        [[ $# -lt 2 ]] && { echo "Error: --profile requires a value" >&2; exit 2; }
+        OVERRIDE_PROFILE="$2"
         shift 2
         ;;
       --help|-h)

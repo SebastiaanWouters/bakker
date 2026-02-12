@@ -29,6 +29,7 @@ const BACKUP_DIR = "/data/backups";
 const CONFIG_FILE = "/data/config/config.json";
 const TEMPLATES_FILE = "/data/config/templates.json";
 const PASSWORDS_FILE = "/data/config/passwords.enc";
+const BACKUP_IDS_FILE = "/data/config/backup-ids.json";
 const LOG_FILE = "/data/logs/backup.log";
 const STATUS_DIR = "/tmp";
 const STATUS_PREFIX = "backup-status-";
@@ -540,12 +541,118 @@ async function getBackupStatus(): Promise<any> {
 }
 
 interface BackupInfo {
+  id: number;
   filename: string;
   size: number;
   sizeMB: string;
   sizeHuman: string;
   date: string;
   database: string;
+}
+
+interface BackupIdStore {
+  nextId: number;
+  byFilename: Record<string, number>;
+}
+
+function sanitizeBackupIdStore(raw: any): BackupIdStore {
+  const byFilename: Record<string, number> = {};
+  let maxId = 0;
+
+  if (raw && typeof raw.byFilename === "object" && raw.byFilename !== null) {
+    for (const [filename, value] of Object.entries(raw.byFilename)) {
+      const id = Number(value);
+      if (!Number.isInteger(id) || id < 1) continue;
+      byFilename[filename] = id;
+      if (id > maxId) maxId = id;
+    }
+  }
+
+  const rawNext = Number(raw?.nextId);
+  const nextId = Number.isInteger(rawNext) && rawNext > 0 ? rawNext : maxId + 1;
+  return {
+    nextId: Math.max(nextId, maxId + 1),
+    byFilename,
+  };
+}
+
+async function readBackupIdStore(): Promise<BackupIdStore> {
+  try {
+    const raw = await readFile(BACKUP_IDS_FILE, "utf-8");
+    if (!raw.trim()) {
+      return { nextId: 1, byFilename: {} };
+    }
+    return sanitizeBackupIdStore(JSON.parse(raw));
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return { nextId: 1, byFilename: {} };
+    }
+    console.warn("[backup-ids] Failed to read store, using defaults:", err);
+    return { nextId: 1, byFilename: {} };
+  }
+}
+
+async function writeBackupIdStore(store: BackupIdStore): Promise<void> {
+  await mkdir("/data/config", { recursive: true });
+  await writeFile(BACKUP_IDS_FILE, JSON.stringify(store, null, 2) + "\n", "utf-8");
+}
+
+let backupIdLock: Promise<void> = Promise.resolve();
+
+async function withBackupIdLock<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = backupIdLock;
+  let release!: () => void;
+  backupIdLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+async function assignBackupIds(
+  backups: Omit<BackupInfo, "id">[],
+): Promise<BackupInfo[]> {
+  return withBackupIdLock(async () => {
+    const idStore = await readBackupIdStore();
+    const usedIds = new Set<number>();
+    let idStoreChanged = false;
+
+    const sortedForAssignment = [...backups].sort((a, b) =>
+      a.filename.localeCompare(b.filename),
+    );
+    const withIds: BackupInfo[] = [];
+
+    for (const backup of sortedForAssignment) {
+      let id = Number(idStore.byFilename[backup.filename]);
+      const idIsValid = Number.isInteger(id) && id > 0;
+
+      if (!idIsValid || usedIds.has(id)) {
+        while (usedIds.has(idStore.nextId)) {
+          idStore.nextId += 1;
+        }
+        id = idStore.nextId;
+        idStore.nextId += 1;
+        idStore.byFilename[backup.filename] = id;
+        idStoreChanged = true;
+      } else if (id >= idStore.nextId) {
+        idStore.nextId = id + 1;
+        idStoreChanged = true;
+      }
+
+      usedIds.add(id);
+      withIds.push({ id, ...backup });
+    }
+
+    if (idStoreChanged) {
+      await writeBackupIdStore(idStore);
+    }
+
+    return withIds;
+  });
 }
 
 function formatBytes(bytes: number): string {
@@ -557,7 +664,8 @@ function formatBytes(bytes: number): string {
 
 async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   const files = await readdir(BACKUP_DIR);
-  const backups: BackupInfo[] = [];
+  files.sort();
+  const backupsWithoutIds: Omit<BackupInfo, "id">[] = [];
 
   for (const file of files) {
     if (!file.endsWith(".sql.gz")) continue;
@@ -574,7 +682,7 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
     const dateStr = match[2];
     const formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)} ${dateStr.slice(9, 11)}:${dateStr.slice(11, 13)}:${dateStr.slice(13, 15)}`;
 
-    backups.push({
+    backupsWithoutIds.push({
       filename: file,
       size: fileStat.size,
       sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
@@ -583,6 +691,8 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
       database,
     });
   }
+
+  const backups = await assignBackupIds(backupsWithoutIds);
 
   backups.sort((a, b) => b.date.localeCompare(a.date));
 

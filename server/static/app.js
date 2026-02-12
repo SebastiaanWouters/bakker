@@ -638,7 +638,7 @@ function renderBackups() {
         <div class="env-meta">${filteredList.length} backup${filteredList.length === 1 ? "" : "s"}</div>
       </div>
       <table class="backup-table">
-        <thead><tr><th>Date</th><th>Size</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Date</th><th>Size</th><th></th></tr></thead>
         <tbody>`;
 
     for (const b of visibleList) {
@@ -651,6 +651,7 @@ function renderBackups() {
         ? '<span class="progress-tag">In progress</span>'
         : "";
       html += `<tr class="${isInProgress ? "in-progress" : ""}">
+        <td>${typeof b.id === "number" ? b.id : "-"}</td>
         <td>${b.date}</td>
         <td>${b.sizeHuman || `${b.sizeMB} MB`}</td>
         <td class="backup-actions">
@@ -662,7 +663,7 @@ function renderBackups() {
     }
 
     if (visibleList.length === 0) {
-      html += `<tr><td colspan="3" class="empty-state">No backups for this database yet.</td></tr>`;
+      html += `<tr><td colspan="4" class="empty-state">No backups for this database yet.</td></tr>`;
     }
 
     html += `</tbody></table>`;

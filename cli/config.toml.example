@@ -7,6 +7,8 @@ timeout_seconds = 30
 [defaults]
 output = "table"
 confirm_import = true
+# Optional default destination profile for imports.
+# profile = "local_dev"
 
 [profiles.local_dev]
 host = "127.0.0.1"
