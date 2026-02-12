@@ -3,7 +3,7 @@ set -euo pipefail
 
 VERSION="0.1.0"
 
-CONFIG_PATH="${BAKKER_CONFIG:-$HOME/.config/bakker/config.toml}"
+CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
 BAKKER_IMAGE=""
 BAKKER_DOCKER_NETWORK=""
@@ -28,7 +28,7 @@ Usage:
   bakker help [command]
 
 Global options:
-  --config <path>        Path to config.toml
+  --config <path>        Path to config.toml (default: ./bakker.config.toml, then ~/.config/bakker/bakker.config.toml)
   --api-url <url>        Override Bakker API URL
   --image <ref>          Override tooling image (default: sebaswouters/bakker:latest)
   --docker-network <n>   Optional docker network for image runs
@@ -38,8 +38,8 @@ Global options:
   --help                 Show this help
 
 Commands:
-  backups list [--db <name>] [--latest] [--json]               List backups from Bakker API (with IDs)
-  import [--profile <name>] (--id <number> | --file <filename>) [--yes]  Import backup into destination DB
+  backup list [--db <name>] [--latest] [--json]                List backups from Bakker API (with IDs)
+  import [--profile <name>] [--yes] <id|filename>              Import backup into destination DB
   profiles list                                                 List configured destination profiles
   profiles show <name>                                          Show one destination profile
   doctor                                                        Run local and Bakker health checks
@@ -52,7 +52,7 @@ Password env convention:
 Examples:
   bakker --help
   bakker help import
-  bakker backups --help
+  bakker backup --help
   bakker import --help
 USAGE
 }
@@ -60,7 +60,7 @@ USAGE
 usage_backups() {
   cat <<'USAGE'
 Usage:
-  bakker backups list [--db <name>] [--latest] [--json]
+  bakker backup list [--db <name>] [--latest] [--json]
 
 Options:
   --db <name>    Filter backups to a Bakker database config name
@@ -73,17 +73,18 @@ USAGE
 usage_import() {
   cat <<'USAGE'
 Usage:
-  bakker import [--profile <name>] (--id <number> | --file <filename>) [--yes]
+  bakker import [--profile <name>] [--yes] <id|filename>
 
 Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
-  --id <number>     Backup ID from 'bakker backups list' (server-generated)
-  --file <name>     Backup filename to import
   --yes             Skip import confirmation prompt
   --help, -h        Show this help
 
+Arguments:
+  <id|filename>     Backup ID from 'bakker backup list', or local SQL/SQL.GZ file path
+
 Notes:
-  - Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
+  - For ID-based imports, Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
   - Destination DB password can come from <PROFILE>_DB_PASS (e.g. LOCAL_DEV_DB_PASS).
   - If that env var is not set, password is requested interactively.
 USAGE
@@ -116,7 +117,7 @@ command_help() {
   local topic="${1:-}"
   case "$topic" in
     ""|-h|--help) usage ;;
-    backups) usage_backups ;;
+    backup|backups) usage_backups ;;
     import) usage_import ;;
     profiles) usage_profiles ;;
     doctor) usage_doctor ;;
@@ -194,11 +195,33 @@ add_profile_name() {
 }
 
 ensure_config_exists() {
-  if [[ ! -f "$CONFIG_PATH" ]]; then
+  local cwd_config="./bakker.config.toml"
+  local home_config="$HOME/.config/bakker/bakker.config.toml"
+
+  if [[ -n "$CONFIG_PATH" ]]; then
+    if [[ -f "$CONFIG_PATH" ]]; then
+      return 0
+    fi
     echo "Error: config file not found at $CONFIG_PATH" >&2
     echo "Create it first (see cli/README.md for an example)." >&2
     exit 3
   fi
+
+  if [[ -f "$cwd_config" ]]; then
+    CONFIG_PATH="$cwd_config"
+    return 0
+  fi
+
+  if [[ -f "$home_config" ]]; then
+    CONFIG_PATH="$home_config"
+    return 0
+  fi
+
+  echo "Error: config file not found." >&2
+  echo "Checked: $cwd_config" >&2
+  echo "Checked: $home_config" >&2
+  echo "Create one first (see cli/README.md for an example)." >&2
+  exit 3
 }
 
 load_config() {
@@ -583,7 +606,7 @@ command_backups_list() {
         return 0
         ;;
       *)
-        echo "Error: unknown option for backups list: $1" >&2
+        echo "Error: unknown option for backup list: $1" >&2
         exit 2
         ;;
     esac
@@ -679,8 +702,8 @@ connectivity_check() {
 
 run_import() {
   local profile="$DEFAULT_PROFILE"
-  local filename=""
-  local backup_id=""
+  local import_arg=""
+  local force_local_file="false"
   local no_confirm="false"
 
   while [[ $# -gt 0 ]]; do
@@ -690,19 +713,36 @@ run_import() {
         profile="$2"
         shift 2
         ;;
+      --id)
+        echo "Error: --id is no longer supported." >&2
+        echo "Use positional syntax: 'bakker import <id>'." >&2
+        exit 2
+        ;;
       --file)
         [[ $# -lt 2 ]] && { echo "Error: --file requires a value" >&2; exit 2; }
-        filename="$2"
+        if [[ -n "$import_arg" ]]; then
+          echo "Error: import accepts exactly one target (<id|filename>)." >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          exit 2
+        fi
+        import_arg="$2"
+        force_local_file="true"
         shift 2
         ;;
-      --id)
-        [[ $# -lt 2 ]] && { echo "Error: --id requires a value" >&2; exit 2; }
-        backup_id="$2"
+      --from-file)
+        [[ $# -lt 2 ]] && { echo "Error: --from-file requires a value" >&2; exit 2; }
+        if [[ -n "$import_arg" ]]; then
+          echo "Error: import accepts exactly one target (<id|filename>)." >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          exit 2
+        fi
+        import_arg="$2"
+        force_local_file="true"
         shift 2
         ;;
       --db|--latest)
         echo "Error: --db/--latest is no longer supported for import." >&2
-        echo "Use 'bakker backups list' to find an ID, then run 'bakker import --id <number>'." >&2
+        echo "Use 'bakker backup list' to find an ID, then run 'bakker import <id>'." >&2
         exit 2
         ;;
       --yes)
@@ -713,30 +753,29 @@ run_import() {
         usage_import
         return 0
         ;;
-      *)
+      -*)
         echo "Error: unknown option for import: $1" >&2
         exit 2
+        ;;
+      *)
+        if [[ -n "$import_arg" ]]; then
+          echo "Error: import accepts exactly one target (<id|filename>)." >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          exit 2
+        fi
+        import_arg="$1"
+        shift
         ;;
     esac
   done
 
   [[ -z "$profile" ]] && { echo "Error: --profile is required (or set [defaults].profile / global --profile)" >&2; exit 2; }
 
-  if [[ -n "$filename" && -n "$backup_id" ]]; then
-    echo "Error: use either --file or --id, not both." >&2
+  if [[ -z "$import_arg" ]]; then
+    echo "Error: import requires an <id|filename> argument." >&2
+    echo "Example: bakker import 5" >&2
+    echo "Example: bakker import ./dump.sql.gz" >&2
     exit 2
-  fi
-
-  if [[ -z "$filename" && -z "$backup_id" ]]; then
-    echo "Error: import requires --id <number> OR --file <filename>." >&2
-    exit 2
-  fi
-
-  if [[ -n "$backup_id" ]]; then
-    if [[ ! "$backup_id" =~ ^[0-9]+$ ]] || [[ "$backup_id" -lt 1 ]]; then
-      echo "Error: --id must be a positive integer from 'bakker backups list'." >&2
-      exit 2
-    fi
   fi
 
   require_profile "$profile"
@@ -747,15 +786,24 @@ run_import() {
   user="$(get_profile_value "$profile" user)"
   database="$(get_profile_value "$profile" database)"
 
-  local token backups_json selected_db
-  token="$(get_auth_token)"
-
-  if [[ -n "$backup_id" ]]; then
+  local filename=""
+  local selected_db=""
+  local import_mode=""
+  local local_file_path=""
+  local token=""
+  if [[ "$force_local_file" != "true" && "$import_arg" =~ ^[0-9]+$ ]]; then
+    if [[ "$import_arg" -lt 1 ]]; then
+      echo "Error: <id> must be a positive integer from 'bakker backup list'." >&2
+      exit 2
+    fi
+    import_mode="id"
+    local backup_id="$import_arg"
+    local backups_json resolved
+    token="$(get_auth_token)"
     backups_json="$(api_request GET "/api/backups" "$token")"
-    local resolved
     if ! resolved="$(resolve_backup_file_by_id "$backups_json" "$backup_id")"; then
       echo "Error: no backup found for ID '$backup_id'." >&2
-      echo "Tip: run 'bakker --config $CONFIG_PATH backups list' and choose an ID from the first column." >&2
+      echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
       exit 4
     fi
     IFS=$'\t' read -r filename selected_db <<<"$resolved"
@@ -764,6 +812,15 @@ run_import() {
       exit 4
     fi
     echo "Resolved backup ID $backup_id to '$filename' (database '$selected_db')."
+  else
+    import_mode="local-file"
+    local_file_path="$import_arg"
+    if [[ ! -f "$local_file_path" ]]; then
+      echo "Error: local file not found: $local_file_path" >&2
+      exit 4
+    fi
+    filename="$(basename "$local_file_path")"
+    echo "Using local import file '$local_file_path'."
   fi
 
   local db_password
@@ -775,29 +832,47 @@ run_import() {
     exit 5
   fi
 
-  confirm_if_needed "Import backup '$filename' into profile '$profile' ($user@$host:$port/$database)?" "$no_confirm"
-
-  echo "Starting import of '$filename' into '$profile'..."
-
-  local encoded_filename
-  encoded_filename="$(url_encode_with_bakker_bun "$filename")"
+  local import_label="$filename"
+  if [[ "$import_mode" == "local-file" ]]; then
+    import_label="$local_file_path"
+  fi
+  confirm_if_needed "Import backup '$import_label' into profile '$profile' ($user@$host:$port/$database)?" "$no_confirm"
+  echo "Starting import of '$import_label' into '$profile'..."
 
   local network_args=()
   if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
     network_args=(--network "$BAKKER_DOCKER_NETWORK")
   fi
 
-  curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
-    -H "Authorization: Bearer $token" \
-    "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
-    | docker run --rm -i "${network_args[@]}" \
-        -e MYSQL_PWD="$db_password" \
-        -e DEST_HOST="$host" \
-        -e DEST_PORT="$port" \
-        -e DEST_USER="$user" \
-        -e DEST_DB="$database" \
-        "$BAKKER_IMAGE" \
-        sh -lc 'gunzip | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
+  if [[ "$import_mode" == "id" ]]; then
+    local encoded_filename
+    encoded_filename="$(url_encode_with_bakker_bun "$filename")"
+    curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
+      -H "Authorization: Bearer $token" \
+      "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
+      | docker run --rm -i "${network_args[@]}" \
+          -e MYSQL_PWD="$db_password" \
+          -e DEST_HOST="$host" \
+          -e DEST_PORT="$port" \
+          -e DEST_USER="$user" \
+          -e DEST_DB="$database" \
+          "$BAKKER_IMAGE" \
+          sh -lc 'gunzip | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
+  else
+    local pipeline_cmd='cat | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
+    if [[ "$local_file_path" == *.gz ]]; then
+      pipeline_cmd='gunzip | mariadb -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"'
+    fi
+    cat "$local_file_path" \
+      | docker run --rm -i "${network_args[@]}" \
+          -e MYSQL_PWD="$db_password" \
+          -e DEST_HOST="$host" \
+          -e DEST_PORT="$port" \
+          -e DEST_USER="$user" \
+          -e DEST_DB="$database" \
+          "$BAKKER_IMAGE" \
+          sh -lc "$pipeline_cmd"
+  fi
 
   echo "Import completed successfully."
 }
@@ -921,7 +996,7 @@ parse_global_options() {
         echo "$VERSION"
         exit 0
         ;;
-      backups|import|profiles|doctor)
+      backup|backups|import|profiles|doctor)
         break
         ;;
       *)
@@ -950,7 +1025,7 @@ main() {
 
   # Help paths should work even when config file is missing.
   case "$cmd" in
-    backups)
+    backup|backups)
       if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" || -z "${1:-}" ]]; then
         usage_backups
         return 0
@@ -983,10 +1058,10 @@ main() {
   load_config
 
   case "$cmd" in
-    backups)
+    backup|backups)
       local sub="${1:-}"
       if [[ "$sub" != "list" ]]; then
-        echo "Error: expected 'backups list'" >&2
+        echo "Error: expected 'backup list'" >&2
         exit 2
       fi
       shift

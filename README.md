@@ -42,6 +42,14 @@ volumes:
   bakker-data:
 ```
 
+For pinned upgrades, prefer a release tag:
+
+```yaml
+services:
+  bakker:
+    image: sebaswouters/bakker:X.Y.Z
+```
+
 ## Configuration
 
 Data is stored under `/data` (mounted volume recommended):
@@ -111,9 +119,16 @@ Quick setup:
 
 ```bash
 chmod +x cli/bakker
+cp cli/config.toml.example ./bakker.config.toml
 mkdir -p ~/.config/bakker
-cp cli/config.toml.example ~/.config/bakker/config.toml
+cp cli/config.toml.example ~/.config/bakker/bakker.config.toml
 ```
+
+Config lookup order for the CLI:
+1. `--config <path>`
+2. `BAKKER_CONFIG`
+3. `./bakker.config.toml`
+4. `~/.config/bakker/bakker.config.toml`
 
 Auth:
 - set `BAKKER_AUTH_TOKEN`, or
@@ -123,12 +138,28 @@ Auth:
 Examples:
 
 ```bash
-cli/bakker backups list
-cli/bakker backups list --db prod --latest
-cli/bakker import --profile local_dev --id 3
+cli/bakker backup list
+cli/bakker backup list --db prod --latest
+cli/bakker import --profile local_dev 3
+cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```
 
 For full CLI usage, see `cli/README.md`.
+
+## Releases
+
+On each Git tag push (`vX.Y.Z`), CI publishes:
+- Docker images to Docker Hub:
+  - `sebaswouters/bakker:vX.Y.Z`
+  - `sebaswouters/bakker:X.Y.Z`
+  - `sebaswouters/bakker:X.Y`
+  - `sebaswouters/bakker:X`
+  - `sebaswouters/bakker:latest` (only when `vX.Y.Z` is the highest tag)
+- CLI assets to GitHub Releases:
+  - `bakker`
+  - `bakker.sha256`
+  - `bakker-vX.Y.Z.tar.gz`
+  - `bakker-vX.Y.Z.tar.gz.sha256`
 
 ## How Backups Work
 
