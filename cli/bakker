@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.4"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
@@ -447,22 +447,6 @@ rows.sort((a,b)=>{
   if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
   return a.db.localeCompare(b.db);
 });
-if (rows.every((r)=>r.id===null)) {
-  rows.forEach((r, idx) => { r.id = idx + 1; });
-} else {
-  const used=new Set();
-  let fallbackId=1;
-  for (const row of rows) {
-    if (row.id!==null && !used.has(row.id)) {
-      used.add(row.id);
-      continue;
-    }
-    while (used.has(fallbackId)) fallbackId++;
-    row.id=fallbackId;
-    used.add(fallbackId);
-    fallbackId++;
-  }
-}
 const outputRows=[];
 const latestSeen=new Set();
 for (const row of rows) {
@@ -475,7 +459,8 @@ for (const row of rows) {
 }
 console.log("ID\tNAME\tDATE\tDB\tSIZE");
 for (const r of outputRows) {
-  console.log(`${r.id}\t${r.name}\t${r.date}\t${r.db}\t${r.size}`);
+  const idDisplay=r.id===null ? "-" : String(r.id);
+  console.log(`${idDisplay}\t${r.name}\t${r.date}\t${r.db}\t${r.size}`);
 }'
 
   while IFS=$'\t' read -r col1 col2 col3 col4 col5; do
@@ -516,27 +501,34 @@ rows.sort((a,b)=>{
   if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
   return a.db.localeCompare(b.db);
 });
-if (rows.every((r)=>r.id===null)) {
-  rows.forEach((row, idx) => { row.id = idx + 1; });
-} else {
-  const used=new Set();
-  let fallbackId=1;
-  for (const row of rows) {
-    if (row.id!==null && !used.has(row.id)) {
-      used.add(row.id);
-      continue;
-    }
-    while (used.has(fallbackId)) fallbackId++;
-    row.id=fallbackId;
-    used.add(fallbackId);
-    fallbackId++;
-  }
-}
 const selected=rows.find((row) => row.id===backupId);
 if (!selected || !selected.file) process.exit(2);
 process.stdout.write(`${selected.file}\t${selected.db}`);'
 
   printf '%s' "$json_data" | BACKUP_ID="$backup_id" json_transform_with_bakker_bun "$js_code"
+}
+
+print_available_server_backup_ids() {
+  local json_data="$1"
+  local js_code
+
+  js_code='const fs=require("fs");
+const input=fs.readFileSync(0,"utf8");
+let parsed={};
+try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
+const ids=[];
+for (const list of Object.values(parsed)) {
+  if (!Array.isArray(list)) continue;
+  for (const item of list) {
+    const parsedId=Number(item?.id);
+    if (Number.isInteger(parsedId) && parsedId>0) ids.push(parsedId);
+  }
+}
+const unique=[...new Set(ids)].sort((a,b)=>a-b);
+if (unique.length===0) process.exit(0);
+process.stdout.write(unique.join(", "));'
+
+  printf '%s' "$json_data" | json_transform_with_bakker_bun "$js_code"
 }
 
 require_profile() {
@@ -804,6 +796,13 @@ run_import() {
     if ! resolved="$(resolve_backup_file_by_id "$backups_json" "$backup_id")"; then
       echo "Error: no backup found for ID '$backup_id'." >&2
       echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
+      local available_ids
+      available_ids="$(print_available_server_backup_ids "$backups_json" || true)"
+      if [[ -n "$available_ids" ]]; then
+        echo "Server IDs currently available: $available_ids" >&2
+      else
+        echo "The server response did not contain usable backup IDs." >&2
+      fi
       exit 4
     fi
     IFS=$'\t' read -r filename selected_db <<<"$resolved"
