@@ -11,10 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     locales \
     && curl -fsSL https://repo.mysql.com/RPM-GPG-KEY-mysql-2025 \
       | gpg --dearmor -o /usr/share/keyrings/mysql.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.4-lts mysql-tools" \
+    && echo "deb [signed-by=/usr/share/keyrings/mysql.gpg] http://repo.mysql.com/apt/debian/ bookworm mysql-8.4-lts" \
       > /etc/apt/sources.list.d/mysql.list \
     && apt-get update && apt-get install -y --no-install-recommends \
-      mysql-shell \
+      mysql-client \
       gzip \
       cron \
       tini \
@@ -39,6 +39,11 @@ ENTRYPOINT ["tini", "--"]
 FROM ${BAKKER_BASE_IMAGE}
 
 WORKDIR /app
+
+# Ensure mysql CLI tooling is present even when using an older prebuilt base image.
+RUN if ! command -v mysql >/dev/null 2>&1 || ! command -v mysqldump >/dev/null 2>&1; then \
+      apt-get update && apt-get install -y --no-install-recommends mysql-client && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 COPY config/ config/
 COPY scripts/ scripts/

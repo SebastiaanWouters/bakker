@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 jobs:
-  e2e-mysqlsh-cli:
-    name: E2E MySQLSH + CLI (<=2m)
+  e2e-cli:
+    name: E2E CLI (<=2m)
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash -n scripts/e2e_mysqlsh_cli.sh
+          bash -n scripts/e2e_cli.sh
 
       - name: Warm required images
         shell: bash
@@ -71,4 +71,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ./scripts/e2e_mysqlsh_cli.sh
+          ./scripts/e2e_cli.sh

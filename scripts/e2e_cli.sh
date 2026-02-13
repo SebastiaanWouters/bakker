@@ -81,7 +81,7 @@ wait_for_mysql() {
   local tries=120
 
   for _ in $(seq 1 "$tries"); do
-    if docker exec "$container" mysqladmin ping -uroot "-p$password" --silent >/dev/null 2>&1; then
+    if docker exec -e MYSQL_PWD="$password" "$container" mysqladmin ping -uroot --silent >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -218,7 +218,7 @@ wait_for_mysql "$SRC_CONTAINER" "rootpass"
 wait_for_mysql "$DST_CONTAINER" "rootpass"
 
 log "Seeding source database."
-docker exec -i "$SRC_CONTAINER" mysql -uroot -prootpass "$SRC_DB" <<'SQL'
+docker exec -i -e MYSQL_PWD=rootpass "$SRC_CONTAINER" mysql -uroot "$SRC_DB" <<'SQL'
 CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));
 INSERT INTO users VALUES (1,'alice'),(2,'bob'),(3,'carol');
 CREATE TABLE ignored_table (id INT PRIMARY KEY, note VARCHAR(100));
@@ -227,10 +227,9 @@ CREATE TABLE structure_only (id INT PRIMARY KEY, payload VARCHAR(100));
 INSERT INTO structure_only VALUES (1,'row1'),(2,'row2');
 SQL
 
-log "Granting mysqlsh metadata privileges for backup user."
-docker exec -i "$SRC_CONTAINER" mysql -uroot -prootpass <<'SQL'
+log "Granting source schema privileges for backup user."
+docker exec -i -e MYSQL_PWD=rootpass "$SRC_CONTAINER" mysql -uroot <<'SQL'
 GRANT ALL PRIVILEGES ON sourcedb.* TO 'bakker'@'%';
-GRANT SELECT ON mysql.* TO 'bakker'@'%';
 FLUSH PRIVILEGES;
 SQL
 
@@ -272,7 +271,7 @@ if [[ ! -f "$DATA_DIR/backups/$BACKUP_FILE" ]]; then
   exit 1
 fi
 
-if [[ "$BACKUP_FILE" != *.mysqlsh.tgz ]]; then
+if [[ "$BACKUP_FILE" != *.sql.gz ]]; then
   echo "Unexpected backup extension: $BACKUP_FILE" >&2
   exit 1
 fi
@@ -285,10 +284,10 @@ RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
   "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID"
 
 log "Validating restore results."
-USERS_COUNT="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM users;")"
-STRUCT_EXISTS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='structure_only';")"
-STRUCT_ROWS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM structure_only;")"
-IGNORED_EXISTS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='ignored_table';")"
+USERS_COUNT="$(docker exec -e MYSQL_PWD="$DST_PASS" "$DST_CONTAINER" mysql -N -u"$DST_USER" "$DST_DB" -e "SELECT COUNT(*) FROM users;")"
+STRUCT_EXISTS="$(docker exec -e MYSQL_PWD="$DST_PASS" "$DST_CONTAINER" mysql -N -u"$DST_USER" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='structure_only';")"
+STRUCT_ROWS="$(docker exec -e MYSQL_PWD="$DST_PASS" "$DST_CONTAINER" mysql -N -u"$DST_USER" "$DST_DB" -e "SELECT COUNT(*) FROM structure_only;")"
+IGNORED_EXISTS="$(docker exec -e MYSQL_PWD="$DST_PASS" "$DST_CONTAINER" mysql -N -u"$DST_USER" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='ignored_table';")"
 
 assert_eq "3" "$USERS_COUNT" "users row count"
 assert_eq "1" "$STRUCT_EXISTS" "structure_only table exists"

@@ -9,13 +9,13 @@ CONFIG_NAME="${1:-}"
 CONFIG_FILE="/data/config/config.json"
 BACKUP_DIR="/data/backups"
 LOCK_FILE="/tmp/backup-${CONFIG_NAME:-unknown}.lock"
-TMP_DUMP_DIR=""
 
 export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     echo "$msg"
 }
 
@@ -40,9 +40,6 @@ echo "{\"running\":true,\"database\":\"$CONFIG_NAME\",\"pid\":$$,\"started\":\"$
 
 cleanup_resources() {
     rm -f "$STATUS_FILE"
-    if [[ -n "$TMP_DUMP_DIR" && -d "$TMP_DUMP_DIR" ]]; then
-        rm -rf "$TMP_DUMP_DIR"
-    fi
 }
 trap cleanup_resources EXIT
 
@@ -90,9 +87,12 @@ fi
 log "Backup started for '$CONFIG_NAME'"
 
 # Test connection
-if ! printf '%s\n' "$DB_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
-    -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --schema="$DB_NAME" \
-    --execute 'SELECT 1' > /dev/null 2>&1; then
+if ! command -v mysql >/dev/null 2>&1; then
+    error "No SQL client found: mysql"
+fi
+
+if ! MYSQL_PWD="$DB_PASSWORD" mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
+    --connect-timeout=10 -e 'SELECT 1' "$DB_NAME" > /dev/null 2>&1; then
     error "Failed to connect to database $DB_NAME@$DB_HOST:$DB_PORT"
 fi
 
@@ -100,59 +100,75 @@ fi
 readarray -t IGNORED_TABLES < <(jq -r ".databases.\"${CONFIG_NAME}\".ignored_tables // [] | .[]" "$CONFIG_FILE")
 readarray -t STRUCTURE_ONLY_TABLES < <(jq -r ".databases.\"${CONFIG_NAME}\".structure_only_tables // [] | .[]" "$CONFIG_FILE")
 
-# Generate output filename
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.mysqlsh.tgz"
-TMP_DUMP_DIR="/tmp/mysqlsh-dump-${CONFIG_NAME}-${TIMESTAMP}-$$"
-mkdir -p "$TMP_DUMP_DIR"
+is_ignored_table() {
+    local candidate="$1"
+    local ignored
+    for ignored in "${IGNORED_TABLES[@]}"; do
+        [[ "$ignored" == "$candidate" ]] && return 0
+    done
+    return 1
+}
 
-if ! command -v mysqlsh >/dev/null 2>&1; then
-    error "No dump command found: mysqlsh"
-fi
-
-DUMP_ARGS=(
-    --mysql
-    --passwords-from-stdin
-    -h "$DB_HOST"
-    -P "$DB_PORT"
-    -u "$DB_USER"
-    --
-    util dump-schemas "$DB_NAME"
-    --outputUrl="$TMP_DUMP_DIR"
-    --threads="${MYSQLSH_DUMP_THREADS:-4}"
-    --showProgress=false
-    --consistent=true
-    --defaultCharacterSet=utf8mb4
-)
-
+# Build --ignore-table flags for the main dump.
+# We exclude:
+# - ignored tables entirely
+# - structure_only tables from the main pass (they are dumped as DDL-only later)
+MAIN_IGNORE_FLAGS=()
 for table in "${IGNORED_TABLES[@]}"; do
-    [[ -n "$table" ]] && DUMP_ARGS+=("--excludeTables=${DB_NAME}.${table}")
+    [[ -n "$table" ]] && MAIN_IGNORE_FLAGS+=("--ignore-table=${DB_NAME}.${table}")
 done
 
 for table in "${STRUCTURE_ONLY_TABLES[@]}"; do
-    # Keep table DDL, export no rows.
-    [[ -n "$table" ]] && DUMP_ARGS+=("--where=${DB_NAME}.${table}=0=1")
+    is_ignored_table "$table" && continue
+    [[ -n "$table" ]] && MAIN_IGNORE_FLAGS+=("--ignore-table=${DB_NAME}.${table}")
 done
 
-log "Using dump command: mysqlsh util dump-schemas"
+# Generate output filename
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.sql.gz"
+
+if ! command -v mysqldump >/dev/null 2>&1; then
+    error "No dump command found: mysqldump"
+fi
+
+log "Using dump command: mysqldump"
 set +e
-printf '%s\n' "$DB_PASSWORD" | mysqlsh "${DUMP_ARGS[@]}"
+(
+    set -e
+
+    MYSQL_PWD="$DB_PASSWORD" mysqldump \
+        -h "$DB_HOST" \
+        -P "$DB_PORT" \
+        -u "$DB_USER" \
+        "$DB_NAME" \
+        --single-transaction \
+        --quick \
+        --skip-lock-tables \
+        --no-tablespaces \
+        --extended-insert \
+        --disable-keys \
+        --max-allowed-packet=512M \
+        "${MAIN_IGNORE_FLAGS[@]}"
+
+    # Append schema-only definitions for structure_only tables.
+    for table in "${STRUCTURE_ONLY_TABLES[@]}"; do
+        is_ignored_table "$table" && continue
+        [[ -z "$table" ]] && continue
+        MYSQL_PWD="$DB_PASSWORD" mysqldump \
+            -h "$DB_HOST" \
+            -P "$DB_PORT" \
+            -u "$DB_USER" \
+            --no-data \
+            "$DB_NAME" \
+            "$table"
+    done
+) | gzip > "$DUMP_FILE"
 DUMP_EXIT=$?
 set -e
 
 if [[ $DUMP_EXIT -ne 0 ]]; then
     rm -f "$DUMP_FILE"
-    error "Database export failed (mysqlsh exit: $DUMP_EXIT). Check credentials, connectivity, and disk space."
-fi
-
-set +e
-tar -C "$TMP_DUMP_DIR" -czf "$DUMP_FILE" .
-TAR_EXIT=$?
-set -e
-
-if [[ $TAR_EXIT -ne 0 ]]; then
-    rm -f "$DUMP_FILE"
-    error "Backup archive creation failed (tar exit: $TAR_EXIT)."
+    error "Database export failed (exit code: $DUMP_EXIT). Check credentials, network connectivity, and disk space."
 fi
 
 FILE_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE" 2>/dev/null || echo "0")

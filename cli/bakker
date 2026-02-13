@@ -81,11 +81,12 @@ Options:
   --help, -h        Show this help
 
 Arguments:
-  <id|filename>     Backup ID from 'bakker backup list', or local mysqlsh dump archive/directory
+  <id|filename>     Backup ID from 'bakker backup list', or local .sql.gz file
 
 Notes:
   - For ID-based imports, Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
   - Destination DB password lookup order: <PROFILE>_DB_PASS env var, then profile password in config, then interactive prompt.
+  - Supported import format: .sql.gz.
 USAGE
 }
 
@@ -754,7 +755,14 @@ connectivity_check() {
     -e DEST_DB="$database" \
     -e DEST_PASSWORD="$password" \
     "$BAKKER_IMAGE" \
-    sh -lc 'printf "%s\n" "$DEST_PASSWORD" | mysqlsh --mysql --passwords-from-stdin -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" --schema="$DEST_DB" --execute "SELECT 1;" >/dev/null'
+    sh -lc '
+      set -eu
+      if ! command -v mysql >/dev/null 2>&1; then
+        echo "No SQL client found: mysql." >&2
+        exit 1
+      fi
+      MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" -D "$DEST_DB" -e "SELECT 1;" >/dev/null
+    '
 }
 
 run_import() {
@@ -831,7 +839,7 @@ run_import() {
   if [[ -z "$import_arg" ]]; then
     echo "Error: import requires an <id|filename> argument." >&2
     echo "Example: bakker import 5" >&2
-    echo "Example: bakker import ./dump.mysqlsh.tgz" >&2
+    echo "Example: bakker import ./dump.sql.gz" >&2
     exit 2
   fi
 
@@ -847,7 +855,6 @@ run_import() {
   local selected_db=""
   local import_mode=""
   local local_file_path=""
-  local local_file_kind=""
   local token=""
   if [[ "$force_local_file" != "true" && "$import_arg" =~ ^[0-9]+$ ]]; then
     if [[ "$import_arg" -lt 1 ]]; then
@@ -880,19 +887,14 @@ run_import() {
   else
     import_mode="local-file"
     local_file_path="$import_arg"
-    if [[ ! -f "$local_file_path" && ! -d "$local_file_path" ]]; then
+    if [[ ! -f "$local_file_path" ]]; then
       echo "Error: local file not found: $local_file_path" >&2
       exit 4
     fi
-    if [[ -d "$local_file_path" ]]; then
-      local_file_kind="directory"
-    else
-      local_file_kind="archive"
-      if [[ "$local_file_path" != *.mysqlsh.tgz && "$local_file_path" != *.tgz && "$local_file_path" != *.tar.gz ]]; then
-        echo "Error: unsupported local backup format: $local_file_path" >&2
-        echo "Expected .mysqlsh.tgz/.tgz/.tar.gz, or a mysqlsh dump directory." >&2
-        exit 4
-      fi
+    if [[ "$local_file_path" != *.sql.gz ]]; then
+      echo "Error: unsupported local backup format: $local_file_path" >&2
+      echo "Expected .sql.gz." >&2
+      exit 4
     fi
     filename="$(basename "$local_file_path")"
     echo "Using local import file '$local_file_path'."
@@ -920,53 +922,23 @@ run_import() {
     network_args=(--network "$BAKKER_DOCKER_NETWORK")
   fi
 
-  local load_dump_from_stream_script=""
-read -r -d '' load_dump_from_stream_script <<'SCRIPT' || true
+  local load_sql_from_stream_script=""
+  read -r -d '' load_sql_from_stream_script <<'SCRIPT' || true
 set -eu
-TMP_DUMP_DIR="$(mktemp -d)"
-cleanup() {
-  rm -rf "$TMP_DUMP_DIR"
-}
-trap cleanup EXIT
-tar -xzf - -C "$TMP_DUMP_DIR"
-printf '%s\n' "$DEST_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
-  -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" \
-  --sql --execute "SET GLOBAL local_infile = ON;" >/dev/null 2>&1 || true
-if ! printf '%s\n' "$DEST_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
-  -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" \
-  -- util load-dump "$TMP_DUMP_DIR" \
-  --schema="$DEST_DB" \
-  --threads="${MYSQLSH_LOAD_THREADS:-4}" \
-  --showProgress=false \
-  --ignoreVersion=true \
-  --analyzeTables=off \
-  --deferTableIndexes=fulltext; then
-  echo "ERROR: mysqlsh load-dump failed. Ensure local_infile=ON and grant required privileges on the destination server." >&2
+if ! command -v mysql >/dev/null 2>&1; then
+  echo "ERROR: No SQL client found: mysql." >&2
   exit 1
 fi
-SCRIPT
-
-  local load_dump_from_dir_script=""
-  read -r -d '' load_dump_from_dir_script <<'SCRIPT' || true
-set -eu
-printf '%s\n' "$DEST_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
-  -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" \
-  --sql --execute "SET GLOBAL local_infile = ON;" >/dev/null 2>&1 || true
-if ! printf '%s\n' "$DEST_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
-  -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" \
-  -- util load-dump /dump \
-  --schema="$DEST_DB" \
-  --threads="${MYSQLSH_LOAD_THREADS:-4}" \
-  --showProgress=false \
-  --ignoreVersion=true \
-  --analyzeTables=off \
-  --deferTableIndexes=fulltext; then
-  echo "ERROR: mysqlsh load-dump failed. Ensure local_infile=ON and grant required privileges on the destination server." >&2
-  exit 1
-fi
+gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
 SCRIPT
 
   if [[ "$import_mode" == "id" ]]; then
+    if [[ "$filename" != *.sql.gz ]]; then
+      echo "Error: unsupported server backup format for '$filename'." >&2
+      echo "Supported format is .sql.gz." >&2
+      exit 4
+    fi
+
     local encoded_filename
     encoded_filename="$(url_encode_with_bakker_bun "$filename")"
     curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
@@ -979,31 +951,17 @@ SCRIPT
           -e DEST_USER="$user" \
           -e DEST_DB="$database" \
           "$BAKKER_IMAGE" \
-          sh -lc "$load_dump_from_stream_script"
+          sh -lc "$load_sql_from_stream_script"
   else
-    if [[ "$local_file_kind" == "directory" ]]; then
-      local abs_local_dump_dir
-      abs_local_dump_dir="$(cd "$local_file_path" && pwd)"
-      docker run --rm "${network_args[@]}" \
-        -v "$abs_local_dump_dir:/dump:ro" \
-        -e DEST_PASSWORD="$db_password" \
-        -e DEST_HOST="$host" \
-        -e DEST_PORT="$port" \
-        -e DEST_USER="$user" \
-        -e DEST_DB="$database" \
-        "$BAKKER_IMAGE" \
-        sh -lc "$load_dump_from_dir_script"
-    else
-      cat "$local_file_path" \
-        | docker run --rm -i "${network_args[@]}" \
-            -e DEST_PASSWORD="$db_password" \
-            -e DEST_HOST="$host" \
-            -e DEST_PORT="$port" \
-            -e DEST_USER="$user" \
-            -e DEST_DB="$database" \
-            "$BAKKER_IMAGE" \
-            sh -lc "$load_dump_from_stream_script"
-    fi
+    cat "$local_file_path" \
+      | docker run --rm -i "${network_args[@]}" \
+          -e DEST_PASSWORD="$db_password" \
+          -e DEST_HOST="$host" \
+          -e DEST_PORT="$port" \
+          -e DEST_USER="$user" \
+          -e DEST_DB="$database" \
+          "$BAKKER_IMAGE" \
+          sh -lc "$load_sql_from_stream_script"
   fi
 
   echo "Import completed successfully."

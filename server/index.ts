@@ -668,14 +668,14 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   const backupsWithoutIds: Omit<BackupInfo, "id">[] = [];
 
   for (const file of files) {
-    if (!file.endsWith(".mysqlsh.tgz")) continue;
+    if (!file.endsWith(".sql.gz")) continue;
 
     const filePath = join(BACKUP_DIR, file);
     const fileStat = await stat(filePath);
 
-    // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.mysqlsh.tgz
+    // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
     // Greedy match handles underscores in config names
-    const match = file.match(/^(.+)_(\d{8}_\d{6})\.mysqlsh\.tgz$/);
+    const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
     if (!match) continue;
 
     const database = match[1];
@@ -821,32 +821,15 @@ const server = Bun.serve({
         typeof db_port === "string" && db_port.trim().length > 0
           ? db_port.trim()
           : "3306";
-      const args = [
-        "--mysql",
-        "--passwords-from-stdin",
-        "-h",
-        db_host,
-        "-P",
-        port,
-        "-u",
-        db_user,
-        "--schema",
-        db_name,
-        "--execute",
-        "SELECT 1;",
-      ];
+      const args = ["-h", db_host, "-P", port, "-u", db_user, "-D", db_name, "-e", "SELECT 1;"];
 
       try {
         const result = await new Promise<{ code: number | null }>(
           (resolve, reject) => {
-            const child = spawn("mysqlsh", args, {
-              stdio: ["pipe", "ignore", "ignore"],
-              env: process.env,
+            const child = spawn("mysql", args, {
+              stdio: "ignore",
+              env: { ...process.env, MYSQL_PWD: password },
             });
-            if (child.stdin) {
-              child.stdin.write(`${password}\n`);
-              child.stdin.end();
-            }
             child.on("error", reject);
             child.on("close", (code) => resolve({ code }));
           },

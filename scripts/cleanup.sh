@@ -11,7 +11,8 @@ RETENTION="${2:-5}"
 BACKUP_DIR="/data/backups"
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] CLEANUP: $*"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] CLEANUP: $*"
     echo "$msg"
 }
 
@@ -20,10 +21,9 @@ if [[ -z "$CONFIG_NAME" ]]; then
     exit 1
 fi
 
-PATTERN="${CONFIG_NAME}_[0-9]*.mysqlsh.tgz"
-
-# Find matching files, sorted by name (timestamp in filename ensures chronological order)
-mapfile -t FILES < <(find "$BACKUP_DIR" -maxdepth 1 -name "$PATTERN" -type f | sort)
+# Find matching files, sorted by name
+# (timestamp in filename ensures chronological order)
+mapfile -t FILES < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "${CONFIG_NAME}_[0-9]*.sql.gz" | sort)
 
 TOTAL=${#FILES[@]}
 

@@ -9,13 +9,13 @@ STATUS_PATTERN="/tmp/backup-status-*.json"
 
 echo "[entrypoint] Starting DB Backup service..."
 
-# Ensure mysqlsh is available in runtime image
-if ! command -v mysqlsh >/dev/null 2>&1; then
-    echo "[entrypoint] ERROR: mysqlsh is not installed in the container image."
+# Ensure dump tooling is available in runtime image
+if ! command -v mysqldump >/dev/null 2>&1; then
+    echo "[entrypoint] ERROR: no dump client found: mysqldump."
     exit 1
 fi
-if ! mysqlsh --version >/dev/null 2>&1; then
-    echo "[entrypoint] ERROR: mysqlsh is installed but not executable."
+if ! command -v mysql >/dev/null 2>&1; then
+    echo "[entrypoint] ERROR: no SQL client found: mysql."
     exit 1
 fi
 
@@ -38,6 +38,7 @@ fi
 touch "$LOG_FILE"
 
 # Clear any stale status files
+# shellcheck disable=SC2086 # Intentionally relies on glob expansion.
 rm -f $STATUS_PATTERN
 
 # Generate crontab from config

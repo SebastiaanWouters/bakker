@@ -55,7 +55,7 @@ services:
 Data is stored under `/data` (mounted volume recommended):
 - `/data/config/config.json` - main config
 - `/data/config/passwords.enc` - encrypted password store
-- `/data/backups` - `.mysqlsh.tgz` backups
+- `/data/backups` - `.sql.gz` backups
 - `/data/logs/backup.log` - cron + backup logs
 
 `config.json` schema:
@@ -152,7 +152,7 @@ Examples:
 cli/bakker backup list
 cli/bakker backup list --db prod --latest
 cli/bakker import --profile local_dev 3
-cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.mysqlsh.tgz
+cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```
 
 For full CLI usage, see `cli/README.md`.
@@ -174,13 +174,13 @@ On each Git tag push (`vX.Y.Z`), CI publishes:
 
 ## How Backups Work
 
-Backups are created by `/app/scripts/backup.sh` using `mysqlsh util dump-schemas` and archived as `.mysqlsh.tgz`. Each backup is saved as:
+Backups are created by `/app/scripts/backup.sh` using `mysqldump` and gzip. Each backup is saved as:
 
 ```
-/data/backups/<config>_YYYYMMDD_HHMMSS.mysqlsh.tgz
+/data/backups/<config>_YYYYMMDD_HHMMSS.sql.gz
 ```
 
-Backups run with MySQL Shell's consistent online dump mode, so normal application read/write traffic remains available during backup.
+Backups use single-transaction dump mode to minimize locking during normal application read/write traffic (for transactional tables such as InnoDB).
 
 Retention is enforced after each backup via `/app/scripts/cleanup.sh`.
 
@@ -208,10 +208,10 @@ Make sure the `/data` paths exist or update them if you’re developing without 
 
 ## E2E Verification
 
-Run the full mysqlsh backup/import end-to-end check (Bakker container + CLI + MySQL 8.4 source/destination):
+Run the backup/import end-to-end check (Bakker container + CLI + MySQL 8.4 source/destination):
 
 ```bash
-./scripts/e2e_mysqlsh_cli.sh
+./scripts/e2e_cli.sh
 ```
 
 What it does:

@@ -107,12 +107,12 @@ Import backup:
 ```bash
 cli/bakker backup list
 cli/bakker import --profile local_dev 3
-cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.mysqlsh.tgz
+cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```
 
 `import` accepts either:
 - a backup ID from `backup list`, or
-- a local mysqlsh dump archive (`.mysqlsh.tgz` / `.tgz` / `.tar.gz`) or mysqlsh dump directory path (relative paths are resolved from your current directory).
+- a local SQL dump archive (`.sql.gz`) path (relative paths are resolved from your current directory).
 
 Profile commands:
 
