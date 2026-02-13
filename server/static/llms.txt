@@ -1,6 +1,6 @@
 # Bakker
 
-> Lightweight, self-hosted MariaDB/MySQL backup service with a web UI, REST API, and cron-based scheduling.
+> Lightweight, self-hosted MySQL backup service with a web UI, REST API, and cron-based scheduling.
 
 ## Overview
 

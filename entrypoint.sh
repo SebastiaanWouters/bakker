@@ -9,6 +9,16 @@ STATUS_PATTERN="/tmp/backup-status-*.json"
 
 echo "[entrypoint] Starting DB Backup service..."
 
+# Ensure mysqlsh is available in runtime image
+if ! command -v mysqlsh >/dev/null 2>&1; then
+    echo "[entrypoint] ERROR: mysqlsh is not installed in the container image."
+    exit 1
+fi
+if ! mysqlsh --version >/dev/null 2>&1; then
+    echo "[entrypoint] ERROR: mysqlsh is installed but not executable."
+    exit 1
+fi
+
 # Enforce auth token in non-dev environments
 if [[ "${DEV:-0}" != "1" && -z "${AUTH_TOKEN:-}" ]]; then
     echo "[entrypoint] ERROR: AUTH_TOKEN is required in production. Set AUTH_TOKEN and restart."

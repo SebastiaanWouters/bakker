@@ -1,6 +1,6 @@
 # Bakker
 
-Lightweight, self-hosted MariaDB/MySQL backup service with a small web UI, REST API, and cron-based scheduling. Runs fully in Docker and stores backups/config on a mounted `/data` volume.
+Lightweight, self-hosted MySQL backup service with a small web UI, REST API, and cron-based scheduling. Runs fully in Docker and stores backups/config on a mounted `/data` volume.
 
 **What it does**
 - Schedules database dumps via cron and keeps a rolling retention per database.
@@ -55,7 +55,7 @@ services:
 Data is stored under `/data` (mounted volume recommended):
 - `/data/config/config.json` - main config
 - `/data/config/passwords.enc` - encrypted password store
-- `/data/backups` - `.sql.gz` backups
+- `/data/backups` - `.mysqlsh.tgz` backups
 - `/data/logs/backup.log` - cron + backup logs
 
 `config.json` schema:
@@ -152,7 +152,7 @@ Examples:
 cli/bakker backup list
 cli/bakker backup list --db prod --latest
 cli/bakker import --profile local_dev 3
-cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
+cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.mysqlsh.tgz
 ```
 
 For full CLI usage, see `cli/README.md`.
@@ -174,15 +174,29 @@ On each Git tag push (`vX.Y.Z`), CI publishes:
 
 ## How Backups Work
 
-Backups are created by `/app/scripts/backup.sh` using `mysqldump`, UTF-8/hex-safe dump flags, and gzip. Each backup is saved as:
+Backups are created by `/app/scripts/backup.sh` using `mysqlsh util dump-schemas` and archived as `.mysqlsh.tgz`. Each backup is saved as:
 
 ```
-/data/backups/<config>_YYYYMMDD_HHMMSS.sql.gz
+/data/backups/<config>_YYYYMMDD_HHMMSS.mysqlsh.tgz
 ```
+
+Backups run with MySQL Shell's consistent online dump mode, so normal application read/write traffic remains available during backup.
 
 Retention is enforced after each backup via `/app/scripts/cleanup.sh`.
 
 ## Development (Local)
+
+Build from source:
+
+```bash
+docker build -t bakker:dev .
+```
+
+For faster rebuilds in CI/automation, use the prebuilt base layer:
+
+```bash
+docker build --build-arg BAKKER_BASE_IMAGE=sebaswouters/bakker-base:bookworm-mysql84 -t bakker:dev .
+```
 
 You can run the server locally with Bun:
 
@@ -191,6 +205,28 @@ bun run server/index.ts
 ```
 
 Make sure the `/data` paths exist or update them if you’re developing without Docker.
+
+## E2E Verification
+
+Run the full mysqlsh backup/import end-to-end check (Bakker container + CLI + MySQL 8.4 source/destination):
+
+```bash
+./scripts/e2e_mysqlsh_cli.sh
+```
+
+What it does:
+- builds the local Bakker image
+- creates isolated Docker network + source/destination MySQL containers
+- seeds test data (normal, ignored, and structure-only tables)
+- triggers a Bakker backup and imports it via `cli/bakker`
+- asserts restore behavior (`users=3`, `structure_only` schema-only, `ignored_table` excluded)
+
+The script is rerunnable and cleans up containers, network, and scratch files automatically (including on failure).
+
+Useful overrides:
+- `BAKKER_E2E_SKIP_BUILD=1` to skip local image build.
+- `BAKKER_E2E_IMAGE=<image>` to use a specific image tag.
+- `BAKKER_E2E_MAX_SECONDS=120` to fail if runtime exceeds 2 minutes.
 
 ## Troubleshooting
 

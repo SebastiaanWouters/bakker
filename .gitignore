@@ -19,3 +19,6 @@ Thumbs.db
 
 # Local tooling artifacts
 tmp/
+
+# E2E scratch workspace (created by scripts/e2e_mysqlsh_cli.sh)
+tmp/e2e/

@@ -668,14 +668,14 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   const backupsWithoutIds: Omit<BackupInfo, "id">[] = [];
 
   for (const file of files) {
-    if (!file.endsWith(".sql.gz")) continue;
+    if (!file.endsWith(".mysqlsh.tgz")) continue;
 
     const filePath = join(BACKUP_DIR, file);
     const fileStat = await stat(filePath);
 
-    // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
+    // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.mysqlsh.tgz
     // Greedy match handles underscores in config names
-    const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
+    const match = file.match(/^(.+)_(\d{8}_\d{6})\.mysqlsh\.tgz$/);
     if (!match) continue;
 
     const database = match[1];
@@ -822,25 +822,31 @@ const server = Bun.serve({
           ? db_port.trim()
           : "3306";
       const args = [
+        "--mysql",
+        "--passwords-from-stdin",
         "-h",
         db_host,
         "-P",
         port,
         "-u",
         db_user,
-        "-D",
+        "--schema",
         db_name,
-        "-e",
+        "--execute",
         "SELECT 1;",
       ];
 
       try {
         const result = await new Promise<{ code: number | null }>(
           (resolve, reject) => {
-            const child = spawn("mariadb", args, {
-              stdio: "ignore",
-              env: { ...process.env, MYSQL_PWD: password },
+            const child = spawn("mysqlsh", args, {
+              stdio: ["pipe", "ignore", "ignore"],
+              env: process.env,
             });
+            if (child.stdin) {
+              child.stdin.write(`${password}\n`);
+              child.stdin.end();
+            }
             child.on("error", reject);
             child.on("close", (code) => resolve({ code }));
           },

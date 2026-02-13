@@ -9,6 +9,10 @@ CONFIG_NAME="${1:-}"
 CONFIG_FILE="/data/config/config.json"
 BACKUP_DIR="/data/backups"
 LOCK_FILE="/tmp/backup-${CONFIG_NAME:-unknown}.lock"
+TMP_DUMP_DIR=""
+
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -34,10 +38,13 @@ fi
 STATUS_FILE="/tmp/backup-status-${CONFIG_NAME}.json"
 echo "{\"running\":true,\"database\":\"$CONFIG_NAME\",\"pid\":$$,\"started\":\"$(date -Iseconds)\"}" > "$STATUS_FILE"
 
-cleanup_status() {
+cleanup_resources() {
     rm -f "$STATUS_FILE"
+    if [[ -n "$TMP_DUMP_DIR" && -d "$TMP_DUMP_DIR" ]]; then
+        rm -rf "$TMP_DUMP_DIR"
+    fi
 }
-trap cleanup_status EXIT
+trap cleanup_resources EXIT
 
 # Read config
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -83,8 +90,9 @@ fi
 log "Backup started for '$CONFIG_NAME'"
 
 # Test connection
-if ! MYSQL_PWD="$DB_PASSWORD" mariadb -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" \
-    --connect-timeout=10 -e 'SELECT 1' "$DB_NAME" > /dev/null 2>&1; then
+if ! printf '%s\n' "$DB_PASSWORD" | mysqlsh --mysql --passwords-from-stdin \
+    -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" --schema="$DB_NAME" \
+    --execute 'SELECT 1' > /dev/null 2>&1; then
     error "Failed to connect to database $DB_NAME@$DB_HOST:$DB_PORT"
 fi
 
@@ -92,55 +100,59 @@ fi
 readarray -t IGNORED_TABLES < <(jq -r ".databases.\"${CONFIG_NAME}\".ignored_tables // [] | .[]" "$CONFIG_FILE")
 readarray -t STRUCTURE_ONLY_TABLES < <(jq -r ".databases.\"${CONFIG_NAME}\".structure_only_tables // [] | .[]" "$CONFIG_FILE")
 
-# Build --ignore-table flags (completely excluded tables)
-IGNORE_FLAGS=()
-for table in "${IGNORED_TABLES[@]}"; do
-    [[ -n "$table" ]] && IGNORE_FLAGS+=("--ignore-table=${DB_NAME}.${table}")
-done
-
-# Build --ignore-table-data flags (structure only, no data)
-for table in "${STRUCTURE_ONLY_TABLES[@]}"; do
-    [[ -n "$table" ]] && IGNORE_FLAGS+=("--ignore-table-data=${DB_NAME}.${table}")
-done
-
 # Generate output filename
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.sql.gz"
+DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.mysqlsh.tgz"
+TMP_DUMP_DIR="/tmp/mysqlsh-dump-${CONFIG_NAME}-${TIMESTAMP}-$$"
+mkdir -p "$TMP_DUMP_DIR"
 
-# Use mysqldump only for deterministic, MySQL-compatible output.
-DUMP_CMD="mysqldump"
-if ! command -v "$DUMP_CMD" >/dev/null 2>&1; then
-    error "No dump command found: mysqldump"
+if ! command -v mysqlsh >/dev/null 2>&1; then
+    error "No dump command found: mysqlsh"
 fi
 
 DUMP_ARGS=(
+    --mysql
+    --passwords-from-stdin
     -h "$DB_HOST"
     -P "$DB_PORT"
     -u "$DB_USER"
-    --single-transaction
-    --quick
-    --skip-lock-tables
-    --no-tablespaces
-    --extended-insert
-    --disable-keys
-    --hex-blob
-    --default-character-set=utf8mb4
-    --max-allowed-packet=512M
-    "$DB_NAME"
-    "${IGNORE_FLAGS[@]}"
+    --
+    util dump-schemas "$DB_NAME"
+    --outputUrl="$TMP_DUMP_DIR"
+    --threads="${MYSQLSH_DUMP_THREADS:-4}"
+    --showProgress=false
+    --consistent=true
+    --defaultCharacterSet=utf8mb4
 )
 
-log "Using dump command: $DUMP_CMD"
+for table in "${IGNORED_TABLES[@]}"; do
+    [[ -n "$table" ]] && DUMP_ARGS+=("--excludeTables=${DB_NAME}.${table}")
+done
+
+for table in "${STRUCTURE_ONLY_TABLES[@]}"; do
+    # Keep table DDL, export no rows.
+    [[ -n "$table" ]] && DUMP_ARGS+=("--where=${DB_NAME}.${table}=0=1")
+done
+
+log "Using dump command: mysqlsh util dump-schemas"
 set +e
-MYSQL_PWD="$DB_PASSWORD" "$DUMP_CMD" "${DUMP_ARGS[@]}" | gzip -c > "$DUMP_FILE"
-PIPE_STATUS=("${PIPESTATUS[@]}")
+printf '%s\n' "$DB_PASSWORD" | mysqlsh "${DUMP_ARGS[@]}"
+DUMP_EXIT=$?
 set -e
 
-DUMP_EXIT=${PIPE_STATUS[0]:-1}
-GZIP_EXIT=${PIPE_STATUS[1]:-1}
-if [[ $DUMP_EXIT -ne 0 || $GZIP_EXIT -ne 0 ]]; then
+if [[ $DUMP_EXIT -ne 0 ]]; then
     rm -f "$DUMP_FILE"
-    error "Database export failed (dump exit: $DUMP_EXIT, gzip exit: $GZIP_EXIT). Check credentials, connectivity, and disk space."
+    error "Database export failed (mysqlsh exit: $DUMP_EXIT). Check credentials, connectivity, and disk space."
+fi
+
+set +e
+tar -C "$TMP_DUMP_DIR" -czf "$DUMP_FILE" .
+TAR_EXIT=$?
+set -e
+
+if [[ $TAR_EXIT -ne 0 ]]; then
+    rm -f "$DUMP_FILE"
+    error "Backup archive creation failed (tar exit: $TAR_EXIT)."
 fi
 
 FILE_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE" 2>/dev/null || echo "0")

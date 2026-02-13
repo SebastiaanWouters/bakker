@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-mysqlsh-cli:
+    name: E2E MySQLSH + CLI (<=2m)
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate e2e script syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/e2e_mysqlsh_cli.sh
+
+      - name: Warm required images
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull mysql:8.4
+
+      - name: Resolve base image source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker pull sebaswouters/bakker-base:bookworm-mysql84; then
+            echo "BAKKER_BASE_IMAGE=sebaswouters/bakker-base:bookworm-mysql84" >> "$GITHUB_ENV"
+            echo "NEED_LOCAL_BASE=0" >> "$GITHUB_ENV"
+          else
+            echo "BAKKER_BASE_IMAGE=bakker-base-local" >> "$GITHUB_ENV"
+            echo "NEED_LOCAL_BASE=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build local base image fallback
+        if: env.NEED_LOCAL_BASE == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --target bakker-base-local -t bakker-base-local .
+
+      - name: Build app image from current commit (<=1m)
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg BAKKER_BASE_IMAGE="$BAKKER_BASE_IMAGE" \
+            -t bakker:ci \
+            .
+
+      - name: Run E2E test
+        timeout-minutes: 2
+        env:
+          BAKKER_E2E_IMAGE: bakker:ci
+          BAKKER_E2E_SKIP_BUILD: "1"
+          BAKKER_E2E_MAX_SECONDS: "120"
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/e2e_mysqlsh_cli.sh

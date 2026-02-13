@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+START_TS="$(date +%s)"
+RUN_ID="bakker-e2e-$(date +%s)-$$"
+RUN_DIR="$ROOT_DIR/tmp/e2e/$RUN_ID"
+DATA_DIR="$RUN_DIR/data"
+CLI_CONFIG="$RUN_DIR/bakker.config.toml"
+NETWORK="${RUN_ID}-net"
+SRC_CONTAINER="${RUN_ID}-src"
+DST_CONTAINER="${RUN_ID}-dst"
+APP_CONTAINER="${RUN_ID}-app"
+IMAGE_TAG="${BAKKER_E2E_IMAGE:-bakker:e2e-local}"
+SKIP_BUILD="${BAKKER_E2E_SKIP_BUILD:-0}"
+MAX_SECONDS="${BAKKER_E2E_MAX_SECONDS:-0}"
+AUTH_TOKEN="bakker-e2e-token"
+ENC_SECRET="bakker-e2e-secret"
+
+SRC_DB="sourcedb"
+DST_DB="restoredb"
+SRC_USER="bakker"
+SRC_PASS="sourcepass"
+DST_USER="bakker"
+DST_PASS="destpass"
+
+API_PORT=""
+API_URL=""
+
+log() {
+  printf "[e2e] %s\n" "$*"
+}
+
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing required command: $cmd" >&2
+    exit 1
+  fi
+}
+
+container_exists() {
+  local name="$1"
+  docker ps -a --format "{{.Names}}" | grep -Fx "$name" >/dev/null 2>&1
+}
+
+cleanup() {
+  local status=$?
+  local end_ts elapsed
+  end_ts="$(date +%s)"
+  elapsed=$((end_ts - START_TS))
+
+  if [[ $status -ne 0 ]]; then
+    log "Failure detected, collecting diagnostic logs."
+    if container_exists "$APP_CONTAINER"; then
+      docker logs "$APP_CONTAINER" 2>/dev/null || true
+      docker exec "$APP_CONTAINER" sh -lc 'tail -n 200 /data/logs/backup.log' 2>/dev/null || true
+    fi
+  fi
+
+  docker rm -f "$APP_CONTAINER" "$SRC_CONTAINER" "$DST_CONTAINER" >/dev/null 2>&1 || true
+  docker network rm "$NETWORK" >/dev/null 2>&1 || true
+  rm -rf "$RUN_DIR"
+
+  if [[ "$MAX_SECONDS" =~ ^[0-9]+$ ]] && [[ "$MAX_SECONDS" -gt 0 ]] && [[ "$elapsed" -gt "$MAX_SECONDS" ]]; then
+    echo "E2E runtime exceeded limit: ${elapsed}s > ${MAX_SECONDS}s" >&2
+    status=1
+  fi
+
+  if [[ $status -eq 0 ]]; then
+    log "Cleanup complete (${elapsed}s)."
+  fi
+
+  exit "$status"
+}
+trap cleanup EXIT
+
+wait_for_mysql() {
+  local container="$1"
+  local password="$2"
+  local tries=120
+
+  for _ in $(seq 1 "$tries"); do
+    if docker exec "$container" mysqladmin ping -uroot "-p$password" --silent >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "MySQL container did not become ready: $container" >&2
+  return 1
+}
+
+wait_for_api() {
+  local tries=120
+  for _ in $(seq 1 "$tries"); do
+    if curl -fsS -H "Authorization: Bearer $AUTH_TOKEN" "$API_URL/api/status" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+api_post_json() {
+  local path="$1"
+  local body="$2"
+  curl -fsS -X POST \
+    -H "Authorization: Bearer $AUTH_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$body" \
+    "$API_URL$path"
+}
+
+api_get() {
+  local path="$1"
+  curl -fsS -H "Authorization: Bearer $AUTH_TOKEN" "$API_URL$path"
+}
+
+wait_for_backup() {
+  local tries=180
+  local json backup_file backup_id
+
+  for _ in $(seq 1 "$tries"); do
+    json="$(api_get "/api/backups")"
+    backup_file="$(jq -r '.src[0].filename // empty' <<<"$json")"
+    backup_id="$(jq -r '.src[0].id // empty' <<<"$json")"
+    if [[ -n "$backup_file" && -n "$backup_id" ]]; then
+      printf "%s\t%s\n" "$backup_file" "$backup_id"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Backup artifact did not appear via API." >&2
+  return 1
+}
+
+assert_eq() {
+  local expected="$1"
+  local actual="$2"
+  local label="$3"
+  if [[ "$expected" != "$actual" ]]; then
+    echo "Assertion failed for $label: expected '$expected', got '$actual'" >&2
+    exit 1
+  fi
+}
+
+require_cmd docker
+require_cmd curl
+require_cmd jq
+mkdir -p "$DATA_DIR/config" "$DATA_DIR/backups" "$DATA_DIR/logs"
+
+cat >"$DATA_DIR/config/config.json" <<JSON
+{
+  "retention": 5,
+  "databases": {
+    "src": {
+      "db_host": "$SRC_CONTAINER",
+      "db_port": "3306",
+      "db_name": "$SRC_DB",
+      "db_user": "$SRC_USER",
+      "ignored_tables": ["ignored_table"],
+      "structure_only_tables": ["structure_only"]
+    }
+  },
+  "schedules": []
+}
+JSON
+
+cat >"$CLI_CONFIG" <<TOML
+[bakker]
+api_url = "__API_URL__"
+image = "$IMAGE_TAG"
+docker_network = "$NETWORK"
+timeout_seconds = 60
+
+[defaults]
+output = "table"
+confirm_import = false
+
+[profiles.restore]
+host = "$DST_CONTAINER"
+port = 3306
+user = "$DST_USER"
+database = "$DST_DB"
+TOML
+
+if [[ "$SKIP_BUILD" == "1" ]]; then
+  log "Skipping image build; expecting image '$IMAGE_TAG' to exist locally or be pullable by Docker."
+else
+  log "Building local Bakker image ($IMAGE_TAG)."
+  docker build -t "$IMAGE_TAG" "$ROOT_DIR" >/dev/null
+fi
+
+log "Creating isolated Docker network: $NETWORK"
+docker network create "$NETWORK" >/dev/null
+
+log "Starting MySQL source and destination containers."
+docker run -d --name "$SRC_CONTAINER" --network "$NETWORK" \
+  -e MYSQL_ROOT_PASSWORD=rootpass \
+  -e MYSQL_DATABASE="$SRC_DB" \
+  -e MYSQL_USER="$SRC_USER" \
+  -e MYSQL_PASSWORD="$SRC_PASS" \
+  -e MYSQL_INITDB_SKIP_TZINFO=1 \
+  mysql:8.4 --local-infile=ON >/dev/null
+
+docker run -d --name "$DST_CONTAINER" --network "$NETWORK" \
+  -e MYSQL_ROOT_PASSWORD=rootpass \
+  -e MYSQL_DATABASE="$DST_DB" \
+  -e MYSQL_USER="$DST_USER" \
+  -e MYSQL_PASSWORD="$DST_PASS" \
+  -e MYSQL_INITDB_SKIP_TZINFO=1 \
+  mysql:8.4 --local-infile=ON >/dev/null
+
+log "Waiting for MySQL readiness."
+wait_for_mysql "$SRC_CONTAINER" "rootpass"
+wait_for_mysql "$DST_CONTAINER" "rootpass"
+
+log "Seeding source database."
+docker exec -i "$SRC_CONTAINER" mysql -uroot -prootpass "$SRC_DB" <<'SQL'
+CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100));
+INSERT INTO users VALUES (1,'alice'),(2,'bob'),(3,'carol');
+CREATE TABLE ignored_table (id INT PRIMARY KEY, note VARCHAR(100));
+INSERT INTO ignored_table VALUES (1,'skip-me'),(2,'skip-me-too');
+CREATE TABLE structure_only (id INT PRIMARY KEY, payload VARCHAR(100));
+INSERT INTO structure_only VALUES (1,'row1'),(2,'row2');
+SQL
+
+log "Granting mysqlsh metadata privileges for backup user."
+docker exec -i "$SRC_CONTAINER" mysql -uroot -prootpass <<'SQL'
+GRANT ALL PRIVILEGES ON sourcedb.* TO 'bakker'@'%';
+GRANT SELECT ON mysql.* TO 'bakker'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+log "Starting Bakker container."
+docker run -d --name "$APP_CONTAINER" --network "$NETWORK" -p 127.0.0.1::3500 \
+  -e AUTH_TOKEN="$AUTH_TOKEN" \
+  -e ENCRYPTION_SECRET="$ENC_SECRET" \
+  -e HOST=0.0.0.0 \
+  -e PORT=3500 \
+  -v "$DATA_DIR:/data" \
+  "$IMAGE_TAG" >/dev/null
+
+API_PORT="$(docker port "$APP_CONTAINER" 3500/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)"
+if [[ -z "$API_PORT" ]]; then
+  echo "Failed to resolve mapped API port." >&2
+  exit 1
+fi
+API_URL="http://127.0.0.1:$API_PORT"
+
+sed -i "s|__API_URL__|$API_URL|g" "$CLI_CONFIG"
+
+log "Waiting for Bakker API readiness on $API_URL."
+if ! wait_for_api; then
+  echo "Bakker API did not become ready." >&2
+  exit 1
+fi
+
+log "Configuring source DB password in Bakker."
+api_post_json "/api/passwords/src" "{\"password\":\"$SRC_PASS\"}" >/dev/null
+
+log "Triggering backup."
+api_post_json "/api/backups/trigger" '{"database":"src"}' >/dev/null
+
+log "Waiting for backup artifact."
+IFS=$'\t' read -r BACKUP_FILE BACKUP_ID < <(wait_for_backup)
+
+if [[ ! -f "$DATA_DIR/backups/$BACKUP_FILE" ]]; then
+  echo "Backup file missing on disk: $DATA_DIR/backups/$BACKUP_FILE" >&2
+  exit 1
+fi
+
+if [[ "$BACKUP_FILE" != *.mysqlsh.tgz ]]; then
+  echo "Unexpected backup extension: $BACKUP_FILE" >&2
+  exit 1
+fi
+
+log "Listing backups via CLI."
+BAKKER_AUTH_TOKEN="$AUTH_TOKEN" "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" backup list
+
+log "Importing backup by ID via CLI."
+RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
+  "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID"
+
+log "Validating restore results."
+USERS_COUNT="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM users;")"
+STRUCT_EXISTS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='structure_only';")"
+STRUCT_ROWS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM structure_only;")"
+IGNORED_EXISTS="$(docker exec "$DST_CONTAINER" mysql -N -u"$DST_USER" -p"$DST_PASS" "$DST_DB" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DST_DB' AND table_name='ignored_table';")"
+
+assert_eq "3" "$USERS_COUNT" "users row count"
+assert_eq "1" "$STRUCT_EXISTS" "structure_only table exists"
+assert_eq "0" "$STRUCT_ROWS" "structure_only row count"
+assert_eq "0" "$IGNORED_EXISTS" "ignored_table exists"
+
+log "PASS - backup/import e2e is working."
+log "backup_file=$BACKUP_FILE backup_id=$BACKUP_ID users=$USERS_COUNT structure_only_rows=$STRUCT_ROWS ignored_exists=$IGNORED_EXISTS"
