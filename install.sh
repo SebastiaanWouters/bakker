@@ -184,7 +184,8 @@ BIN_PATH="${TMP_DIR}/${BIN_NAME}"
 SHA_PATH="${TMP_DIR}/${BIN_NAME}.sha256"
 TAR_PATH="${TMP_DIR}/${BIN_NAME}.tar.gz"
 TAR_SHA_PATH="${TMP_DIR}/${BIN_NAME}.tar.gz.sha256"
-RAW_FALLBACK_URL="https://raw.githubusercontent.com/${REPO}/main/cli/${BIN_NAME}"
+RAW_FALLBACK_MAIN_URL="https://raw.githubusercontent.com/${REPO}/main/cli/${BIN_NAME}"
+RAW_FALLBACK_MASTER_URL="https://raw.githubusercontent.com/${REPO}/master/cli/${BIN_NAME}"
 
 say "Installing ${BIN_NAME} (${TAG}) from ${REPO}"
 if download_release_binary_pair "$TAG" "$BIN_PATH" "$SHA_PATH"; then
@@ -200,8 +201,10 @@ elif [[ "$TAG" == "latest" ]]; then
     tar -xzf "$TAR_PATH" -C "$TMP_DIR"
     [[ -f "$BIN_PATH" ]] || fail "release tarball did not contain '${BIN_NAME}'"
   else
-    printf 'warning: no signed release asset found, falling back to main branch CLI\n' >&2
-    download_file "$RAW_FALLBACK_URL" "$BIN_PATH" || fail "failed to download fallback CLI from ${RAW_FALLBACK_URL}"
+    printf 'warning: no signed release asset found, falling back to raw branch CLI (main/master)\n' >&2
+    if ! download_try "$RAW_FALLBACK_MAIN_URL" "$BIN_PATH"; then
+      download_file "$RAW_FALLBACK_MASTER_URL" "$BIN_PATH" || fail "failed to download fallback CLI from ${RAW_FALLBACK_MAIN_URL} or ${RAW_FALLBACK_MASTER_URL}"
+    fi
   fi
 else
   fail "release assets not found for ${TAG}"

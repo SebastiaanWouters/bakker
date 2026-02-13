@@ -118,7 +118,7 @@ It supports:
 Install (one-liner):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SebastiaanWouters/bakker/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/SebastiaanWouters/bakker/master/install.sh | bash
 ```
 
 Local repo setup (without install script):
