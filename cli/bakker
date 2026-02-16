@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.2.7"
+VERSION="0.3.4"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
@@ -36,7 +36,7 @@ Global options:
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
   --profile <name>       Default destination profile for import
-  -v|-vv|-vvv            More frequent import progress updates
+  -v|-vv|-vvv            Richer and more frequent import progress updates
   --help                 Show this help
 
 Commands:
@@ -80,7 +80,7 @@ Usage:
 Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
   --yes             Skip import confirmation prompt
-  -v|-vv|-vvv       More frequent progress heartbeats during import
+  -v|-vv|-vvv       Richer and more frequent progress heartbeats during import
   --help, -h        Show this help
 
 Arguments:
@@ -205,8 +205,8 @@ increase_verbosity() {
 
 import_progress_interval_seconds() {
   case "$VERBOSE_LEVEL" in
-    0) echo 60 ;;
-    1) echo 30 ;;
+    0) echo 30 ;;
+    1) echo 15 ;;
     2) echo 10 ;;
     *) echo 3 ;;
   esac
@@ -218,6 +218,31 @@ log_verbose() {
   if [[ "$VERBOSE_LEVEL" -ge "$level" ]]; then
     echo "$@" >&2
   fi
+}
+
+dd_supports_progress() {
+  dd --help 2>&1 | grep -q 'status=LEVEL'
+}
+
+read_stream_progress_bytes() {
+  local progress_file="$1"
+  if [[ ! -s "$progress_file" ]]; then
+    return 0
+  fi
+  awk '
+    /bytes/ {
+      raw=$1
+      gsub(/[^0-9]/, "", raw)
+      if (raw ~ /^[0-9]+$/) {
+        value=raw
+      }
+    }
+    END {
+      if (value != "") {
+        printf "%s", value
+      }
+    }
+  ' "$progress_file"
 }
 
 profile_key() {
@@ -567,7 +592,8 @@ for (const [db,list] of Object.entries(parsed)) {
       id:Number.isInteger(parsedId) && parsedId>0 ? parsedId : null,
       db,
       date:item?.date||"",
-      file:item?.filename||""
+      file:item?.filename||"",
+      size:Number.isFinite(Number(item?.size)) && Number(item?.size) > 0 ? String(Math.trunc(Number(item?.size))) : ""
     });
   }
 }
@@ -577,7 +603,7 @@ rows.sort((a,b)=>{
 });
 const selected=rows.find((row) => row.id===backupId);
 if (!selected || !selected.file) process.exit(2);
-process.stdout.write(`${selected.file}\t${selected.db}`);'
+process.stdout.write(`${selected.file}\t${selected.db}\t${selected.size}`);'
 
   printf '%s' "$json_data" | BACKUP_ID="$backup_id" json_transform_with_bakker_bun "$js_code"
 }
@@ -893,6 +919,8 @@ run_import() {
 
   local filename=""
   local selected_db=""
+  local selected_size_bytes=""
+  local source_size_bytes=""
   local import_mode=""
   local local_file_path=""
   local token=""
@@ -918,10 +946,13 @@ run_import() {
       fi
       exit 4
     fi
-    IFS=$'\t' read -r filename selected_db <<<"$resolved"
+    IFS=$'\t' read -r filename selected_db selected_size_bytes <<<"$resolved"
     if [[ -z "$filename" ]]; then
       echo "Error: backup ID '$backup_id' resolved to an empty filename." >&2
       exit 4
+    fi
+    if [[ "$selected_size_bytes" =~ ^[0-9]+$ && "$selected_size_bytes" -gt 0 ]]; then
+      source_size_bytes="$selected_size_bytes"
     fi
     echo "Resolved backup ID $backup_id to '$filename' (database '$selected_db')."
   else
@@ -937,6 +968,10 @@ run_import() {
       exit 4
     fi
     filename="$(basename "$local_file_path")"
+    source_size_bytes="$(wc -c < "$local_file_path" | tr -d '[:space:]')"
+    if [[ ! "$source_size_bytes" =~ ^[0-9]+$ ]]; then
+      source_size_bytes=""
+    fi
     echo "Using local import file '$local_file_path'."
   fi
 
@@ -980,16 +1015,81 @@ if ! command -v mysql >/dev/null 2>&1; then
   echo "ERROR: No SQL client found: mysql." >&2
   exit 1
 fi
-gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
+if [ "${TRACK_TABLE_PROGRESS:-0}" = "1" ] && [ -n "${STATUS_FILE:-}" ] && command -v awk >/dev/null 2>&1; then
+  gunzip \
+    | awk -v status_file="$STATUS_FILE" '
+      function update_table(name) {
+        if (name == "" || name == current_table) {
+          return
+        }
+        current_table = name
+        print current_table > status_file
+        close(status_file)
+      }
+      function update_from_line(prefix, line, table_name) {
+        if (index(line, prefix) != 1) {
+          return 0
+        }
+        table_name = line
+        sub(/^.*`/, "", table_name)
+        sub(/`.*/, "", table_name)
+        update_table(table_name)
+        return 1
+      }
+      {
+        update_from_line("-- Table structure for table `", $0) \
+          || update_from_line("-- Dumping data for table `", $0) \
+          || update_from_line("CREATE TABLE `", $0) \
+          || update_from_line("INSERT INTO `", $0)
+        print
+      }
+    ' \
+    | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
+else
+  gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
+fi
 SCRIPT
 
   local progress_interval monitor_pid import_pid import_status started_at now elapsed
+  local progress_tmp_dir="" stream_progress_file="" table_progress_file=""
+  local track_stream_bytes="false" track_table_progress="false"
   progress_interval="$(import_progress_interval_seconds)"
   started_at="$(date +%s)"
 
   log_verbose 3 "Verbose level: $VERBOSE_LEVEL (progress heartbeat every ${progress_interval}s)"
   if [[ "$progress_interval" -gt 0 ]]; then
     echo "Import progress updates enabled (every ${progress_interval}s)." >&2
+  fi
+  if [[ "$VERBOSE_LEVEL" -ge 1 ]]; then
+    progress_tmp_dir="$(mktemp -d)"
+    stream_progress_file="$progress_tmp_dir/stream-progress.log"
+    table_progress_file="$progress_tmp_dir/current-table.txt"
+    : >"$stream_progress_file"
+    : >"$table_progress_file"
+    track_table_progress="true"
+    if [[ -n "$source_size_bytes" ]]; then
+      if dd_supports_progress; then
+        track_stream_bytes="true"
+      else
+        log_verbose 1 "Detailed stream percentage disabled: your 'dd' does not support status=progress."
+      fi
+    fi
+  fi
+
+  local docker_import_args=(--rm -i "${network_args[@]}")
+  docker_import_args+=(
+    -e DEST_PASSWORD="$db_password"
+    -e DEST_HOST="$host"
+    -e DEST_PORT="$port"
+    -e DEST_USER="$user"
+    -e DEST_DB="$database"
+  )
+  if [[ "$track_table_progress" == "true" ]]; then
+    docker_import_args+=(
+      -v "$progress_tmp_dir:/progress"
+      -e TRACK_TABLE_PROGRESS=1
+      -e STATUS_FILE=/progress/current-table.txt
+    )
   fi
 
   if [[ "$import_mode" == "id" ]]; then
@@ -1008,30 +1108,30 @@ SCRIPT
     fi
 
     (
-      curl -sS --fail-with-body "${download_timeout_args[@]}" \
-        -H "Authorization: Bearer $token" \
-        "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
-        | docker run --rm -i "${network_args[@]}" \
-            -e DEST_PASSWORD="$db_password" \
-            -e DEST_HOST="$host" \
-            -e DEST_PORT="$port" \
-            -e DEST_USER="$user" \
-            -e DEST_DB="$database" \
-            "$BAKKER_IMAGE" \
-            sh -lc "$load_sql_from_stream_script"
+      if [[ "$track_stream_bytes" == "true" ]]; then
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
+          | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
+          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+      else
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
+          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+      fi
     ) &
     import_pid=$!
   else
     (
-      cat "$local_file_path" \
-        | docker run --rm -i "${network_args[@]}" \
-            -e DEST_PASSWORD="$db_password" \
-            -e DEST_HOST="$host" \
-            -e DEST_PORT="$port" \
-            -e DEST_USER="$user" \
-            -e DEST_DB="$database" \
-            "$BAKKER_IMAGE" \
-            sh -lc "$load_sql_from_stream_script"
+      if [[ "$track_stream_bytes" == "true" ]]; then
+        cat "$local_file_path" \
+          | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
+          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+      else
+        cat "$local_file_path" \
+          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+      fi
     ) &
     import_pid=$!
   fi
@@ -1039,6 +1139,8 @@ SCRIPT
   monitor_pid=""
   if [[ "$progress_interval" -gt 0 ]]; then
     (
+      previous_transferred_bytes=""
+      stalled_seconds=0
       while kill -0 "$import_pid" >/dev/null 2>&1; do
         sleep "$progress_interval"
         if ! kill -0 "$import_pid" >/dev/null 2>&1; then
@@ -1046,7 +1148,49 @@ SCRIPT
         fi
         now="$(date +%s)"
         elapsed=$((now - started_at))
-        echo "Import in progress (${elapsed}s elapsed)..." >&2
+        details=""
+        if [[ "$VERBOSE_LEVEL" -ge 1 ]]; then
+          if [[ "$track_stream_bytes" == "true" && -n "$source_size_bytes" && "$source_size_bytes" -gt 0 ]]; then
+            transferred_bytes="$(read_stream_progress_bytes "$stream_progress_file" || true)"
+            if [[ "$transferred_bytes" =~ ^[0-9]+$ ]]; then
+              percent=$((transferred_bytes * 100 / source_size_bytes))
+              if [[ "$percent" -gt 100 ]]; then
+                percent=100
+              fi
+              if [[ "$source_size_bytes" -lt 1048576 ]]; then
+                details="stream ${percent}% (${transferred_bytes}/${source_size_bytes} bytes)"
+              else
+                transferred_mib=$((transferred_bytes / 1024 / 1024))
+                total_mib=$((source_size_bytes / 1024 / 1024))
+                details="stream ${percent}% (${transferred_mib}/${total_mib} MiB)"
+              fi
+              if [[ -n "$previous_transferred_bytes" && "$transferred_bytes" -eq "$previous_transferred_bytes" ]]; then
+                stalled_seconds=$((stalled_seconds + progress_interval))
+              else
+                stalled_seconds=0
+              fi
+              previous_transferred_bytes="$transferred_bytes"
+              if [[ "$stalled_seconds" -ge $((progress_interval * 2)) ]]; then
+                details="$details, no stream movement for ${stalled_seconds}s"
+              fi
+            fi
+          fi
+          if [[ -s "$table_progress_file" ]]; then
+            current_table="$(tail -n 1 "$table_progress_file" 2>/dev/null | tr -d '\r\n')"
+            if [[ -n "$current_table" ]]; then
+              if [[ -n "$details" ]]; then
+                details="$details, table $current_table"
+              else
+                details="table $current_table"
+              fi
+            fi
+          fi
+        fi
+        if [[ -n "$details" ]]; then
+          echo "Import in progress (${elapsed}s elapsed, $details)..." >&2
+        else
+          echo "Import in progress (${elapsed}s elapsed)..." >&2
+        fi
       done
     ) &
     monitor_pid=$!
@@ -1060,6 +1204,9 @@ SCRIPT
   if [[ -n "$monitor_pid" ]]; then
     kill "$monitor_pid" >/dev/null 2>&1 || true
     wait "$monitor_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$progress_tmp_dir" && -d "$progress_tmp_dir" ]]; then
+    rm -rf "$progress_tmp_dir"
   fi
 
   if [[ "$import_status" -ne 0 ]]; then

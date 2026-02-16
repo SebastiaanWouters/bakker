@@ -116,7 +116,8 @@ cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.
 - a backup ID from `backup list`, or
 - a local SQL dump archive (`.sql.gz`) path (relative paths are resolved from your current directory).
 
-Imports show periodic progress heartbeats by default; use `-v`, `-vv`, or `-vvv` for more frequent updates.
+Imports show periodic progress heartbeats by default (every 30s).  
+Use `-v`, `-vv`, or `-vvv` for more frequent updates; verbose mode also surfaces extra signals like stream percentage (when detectable) and current table name.
 
 Profile commands:
 

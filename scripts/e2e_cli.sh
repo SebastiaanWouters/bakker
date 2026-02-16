@@ -146,6 +146,26 @@ assert_eq() {
   fi
 }
 
+assert_contains() {
+  local needle="$1"
+  local haystack_file="$2"
+  local label="$3"
+  if ! grep -Fq "$needle" "$haystack_file"; then
+    echo "Assertion failed for $label: expected to find '$needle' in $haystack_file" >&2
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local needle="$1"
+  local haystack_file="$2"
+  local label="$3"
+  if grep -Fq "$needle" "$haystack_file"; then
+    echo "Assertion failed for $label: did not expect to find '$needle' in $haystack_file" >&2
+    exit 1
+  fi
+}
+
 require_cmd docker
 require_cmd curl
 require_cmd jq
@@ -279,9 +299,28 @@ fi
 log "Listing backups via CLI."
 BAKKER_AUTH_TOKEN="$AUTH_TOKEN" "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" backup list
 
-log "Importing backup by ID via CLI."
+log "Importing backup by ID via CLI (default heartbeat cadence)."
+IMPORT_DEFAULT_LOG="$RUN_DIR/import-default.log"
 RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
-  "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID"
+  "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID" \
+  2>&1 | tee "$IMPORT_DEFAULT_LOG"
+assert_contains "Import progress updates enabled (every 30s)." "$IMPORT_DEFAULT_LOG" "default import heartbeat cadence"
+
+log "Resetting destination schema before verbose import validation."
+docker exec -i -e MYSQL_PWD=rootpass "$DST_CONTAINER" mysql -uroot <<SQL
+DROP DATABASE IF EXISTS \`$DST_DB\`;
+CREATE DATABASE \`$DST_DB\`;
+GRANT ALL PRIVILEGES ON \`$DST_DB\`.* TO '$DST_USER'@'%';
+FLUSH PRIVILEGES;
+SQL
+
+log "Re-importing backup with -vvv heartbeat cadence."
+IMPORT_VERBOSE_LOG="$RUN_DIR/import-verbose.log"
+RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
+  "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" -vvv import --profile restore --yes "$BACKUP_ID" \
+  2>&1 | tee "$IMPORT_VERBOSE_LOG"
+assert_contains "Import progress updates enabled (every 3s)." "$IMPORT_VERBOSE_LOG" "verbose import heartbeat cadence"
+assert_not_contains "awk: " "$IMPORT_VERBOSE_LOG" "verbose import parser errors"
 
 log "Validating restore results."
 USERS_COUNT="$(docker exec -e MYSQL_PWD="$DST_PASS" "$DST_CONTAINER" mysql -N -u"$DST_USER" "$DST_DB" -e "SELECT COUNT(*) FROM users;")"
