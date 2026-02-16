@@ -330,8 +330,39 @@ let lastAuthToastAt = 0;
 let authUpdateTimer = null;
 let lastAuthToken = "";
 const AUTH_TOKEN_TTL_MS = 15 * 60 * 1000;
+const AUTH_TOKEN_SESSION_KEY = "bakker.auth.token";
 let authTokenExpiresAt = 0;
 let authTokenClearTimer = null;
+
+function saveAuthTokenToSession(token) {
+  try {
+    if (token) {
+      sessionStorage.setItem(AUTH_TOKEN_SESSION_KEY, token);
+    } else {
+      sessionStorage.removeItem(AUTH_TOKEN_SESSION_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadAuthTokenFromSession() {
+  try {
+    return sessionStorage.getItem(AUTH_TOKEN_SESSION_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function setAuthTokenCookie(token) {
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `bakker_auth_token=${encodeURIComponent(token)}; Path=/; SameSite=Strict${secure}`;
+}
+
+function clearAuthTokenCookie() {
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `bakker_auth_token=; Max-Age=0; Path=/; SameSite=Strict${secure}`;
+}
 
 function getAuthToken() {
   const el = document.getElementById("auth-token");
@@ -351,6 +382,8 @@ function scheduleTokenExpiry() {
   const token = getAuthToken();
   if (!token) return;
   authTokenExpiresAt = Date.now() + AUTH_TOKEN_TTL_MS;
+  saveAuthTokenToSession(token);
+  setAuthTokenCookie(token);
   if (authTokenClearTimer) clearTimeout(authTokenClearTimer);
   authTokenClearTimer = setTimeout(() => {
     clearAuthToken("Auth token expired. Please re-enter.");
@@ -362,6 +395,8 @@ function clearAuthToken(message) {
   if (el) el.value = "";
   lastAuthToken = "";
   authTokenExpiresAt = 0;
+  saveAuthTokenToSession("");
+  clearAuthTokenCookie();
   if (authTokenClearTimer) clearTimeout(authTokenClearTimer);
   authTokenClearTimer = null;
   if (authRequired && message) {
@@ -390,6 +425,8 @@ function scheduleAuthTokenUpdate() {
       setAuthHint(true, "Auth token missing. Enter it to load configuration.");
     }
     lastAuthToken = "";
+    saveAuthTokenToSession("");
+    clearAuthTokenCookie();
     return;
   }
   setAuthHint(false);
@@ -710,7 +747,7 @@ function renderBackups() {
   });
 }
 
-async function downloadBackup(filename) {
+function downloadBackup(filename) {
   try {
     const token = getAuthToken();
     if (authRequired && !token) {
@@ -720,28 +757,14 @@ async function downloadBackup(filename) {
       );
       return;
     }
-    const res = await fetch(`/api/backups/${encodeURIComponent(filename)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    });
-    if (!res.ok) {
-      let message = `Download failed (${res.status})`;
-      try {
-        const data = await res.json();
-        message = data.error || message;
-      } catch {
-        // ignore parse errors
-      }
-      throw new Error(message);
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    if (token) scheduleTokenExpiry();
     const a = document.createElement("a");
-    a.href = url;
+    a.href = `/api/backups/${encodeURIComponent(filename)}`;
     a.download = filename;
+    a.rel = "noopener";
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
     showToast(`Download started for ${filename}`);
   } catch (err) {
     showToast(err.message, "error");
@@ -1584,6 +1607,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("auth-field").hidden = false;
       const tokenInput = document.getElementById("auth-token");
       if (tokenInput) {
+        if (!tokenInput.value.trim()) {
+          tokenInput.value = loadAuthTokenFromSession();
+          if (tokenInput.value.trim()) {
+            scheduleTokenExpiry();
+          }
+        }
         tokenInput.addEventListener("input", scheduleAuthTokenUpdate);
         tokenInput.addEventListener("keydown", (event) => {
           if (event.key === "Enter") {
@@ -1613,8 +1642,4 @@ document.addEventListener("DOMContentLoaded", async () => {
   pollStatus();
   setStatusPollInterval(5000);
   setInterval(loadBackups, 30000);
-});
-
-window.addEventListener("beforeunload", () => {
-  clearAuthToken();
 });

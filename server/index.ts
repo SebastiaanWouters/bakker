@@ -102,14 +102,29 @@ async function serveIndexHtml(): Promise<Response> {
 
 // --- Auth ---
 
-function checkAuth(req: Request, url?: URL): Response | null {
+function checkAuth(req: Request, allowCookieAuth = false): Response | null {
   if (!AUTH_TOKEN) return null;
   const header = req.headers.get("Authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (token !== AUTH_TOKEN) {
-    return json({ error: "Unauthorized" }, 401);
+  const bearerToken = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (bearerToken === AUTH_TOKEN) return null;
+  if (!allowCookieAuth) return json({ error: "Unauthorized" }, 401);
+
+  const cookieHeader = req.headers.get("Cookie") || "";
+  const cookieToken = cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("bakker_auth_token="))
+    ?.slice("bakker_auth_token=".length);
+
+  if (cookieToken) {
+    try {
+      if (decodeURIComponent(cookieToken) === AUTH_TOKEN) return null;
+    } catch {
+      // Ignore malformed cookie values.
+    }
   }
-  return null;
+
+  return json({ error: "Unauthorized" }, 401);
 }
 
 // --- Password Encryption ---
@@ -775,7 +790,9 @@ const server = Bun.serve({
       path !== "/api/auth-required" &&
       path !== "/api/dev-reload"
     ) {
-      const authErr = checkAuth(req, url);
+      const allowCookieAuth =
+        method === "GET" && path.startsWith("/api/backups/");
+      const authErr = checkAuth(req, allowCookieAuth);
       if (authErr) return authErr;
     }
 
@@ -1049,14 +1066,23 @@ const server = Bun.serve({
         return json({ error: "Invalid filename" }, 400);
       }
       const filePath = join(BACKUP_DIR, filename);
-      const file = Bun.file(filePath);
-      if (!(await file.exists())) {
+      let fileInfo: Awaited<ReturnType<typeof stat>>;
+      try {
+        fileInfo = await stat(filePath);
+      } catch {
         return json({ error: "Backup not found" }, 404);
       }
-      return new Response(file, {
+      if (!fileInfo.isFile()) {
+        return json({ error: "Backup not found" }, 404);
+      }
+      const file = Bun.file(filePath);
+      return new Response(file.stream(), {
         headers: {
           "Content-Type": "application/gzip",
           "Content-Disposition": `attachment; filename="${filename}"`,
+          "Content-Length": String(fileInfo.size),
+          "Cache-Control": "no-store, no-transform",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     }

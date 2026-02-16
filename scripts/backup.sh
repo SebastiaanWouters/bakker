@@ -36,10 +36,14 @@ fi
 
 # Write status file for the API
 STATUS_FILE="/tmp/backup-status-${CONFIG_NAME}.json"
+TMP_DUMP_FILE=""
 echo "{\"running\":true,\"database\":\"$CONFIG_NAME\",\"pid\":$$,\"started\":\"$(date -Iseconds)\"}" > "$STATUS_FILE"
 
 cleanup_resources() {
     rm -f "$STATUS_FILE"
+    if [[ -n "$TMP_DUMP_FILE" ]]; then
+        rm -f "$TMP_DUMP_FILE"
+    fi
 }
 trap cleanup_resources EXIT
 
@@ -126,6 +130,8 @@ done
 # Generate output filename
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 DUMP_FILE="${BACKUP_DIR}/${CONFIG_NAME}_${TIMESTAMP}.sql.gz"
+TMP_DUMP_FILE="${DUMP_FILE}.part"
+rm -f "$TMP_DUMP_FILE"
 
 if ! command -v mysqldump >/dev/null 2>&1; then
     error "No dump command found: mysqldump"
@@ -162,14 +168,16 @@ set +e
             "$DB_NAME" \
             "$table"
     done
-) | gzip > "$DUMP_FILE"
+) | gzip > "$TMP_DUMP_FILE"
 DUMP_EXIT=$?
 set -e
 
 if [[ $DUMP_EXIT -ne 0 ]]; then
-    rm -f "$DUMP_FILE"
     error "Database export failed (exit code: $DUMP_EXIT). Check credentials, network connectivity, and disk space."
 fi
+
+mv "$TMP_DUMP_FILE" "$DUMP_FILE"
+TMP_DUMP_FILE=""
 
 FILE_SIZE=$(stat -c%s "$DUMP_FILE" 2>/dev/null || stat -f%z "$DUMP_FILE" 2>/dev/null || echo "0")
 FILE_SIZE_MB=$(awk "BEGIN {printf \"%.2f\", $FILE_SIZE / 1024 / 1024}")
