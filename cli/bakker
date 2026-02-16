@@ -971,7 +971,11 @@ run_import() {
 
   local load_sql_from_stream_script=""
   read -r -d '' load_sql_from_stream_script <<'SCRIPT' || true
-set -euo pipefail
+set -eu
+# Some /bin/sh implementations (e.g. dash) do not support pipefail.
+if (set -o pipefail) >/dev/null 2>&1; then
+  set -o pipefail
+fi
 if ! command -v mysql >/dev/null 2>&1; then
   echo "ERROR: No SQL client found: mysql." >&2
   exit 1
