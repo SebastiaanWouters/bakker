@@ -152,6 +152,7 @@ Examples:
 cli/bakker backup list
 cli/bakker backup list --db prod --latest
 cli/bakker import --profile local_dev 3
+cli/bakker import -v --profile local_dev 3
 cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```
 

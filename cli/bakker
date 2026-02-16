@@ -11,6 +11,7 @@ REQUEST_TIMEOUT=""
 DEFAULT_OUTPUT=""
 DEFAULT_CONFIRM_IMPORT=""
 DEFAULT_PROFILE=""
+VERBOSE_LEVEL=0
 
 OVERRIDE_API_URL=""
 OVERRIDE_IMAGE=""
@@ -35,6 +36,7 @@ Global options:
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
   --profile <name>       Default destination profile for import
+  -v|-vv|-vvv            More frequent import progress updates
   --help                 Show this help
 
 Commands:
@@ -78,6 +80,7 @@ Usage:
 Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
   --yes             Skip import confirmation prompt
+  -v|-vv|-vvv       More frequent progress heartbeats during import
   --help, -h        Show this help
 
 Arguments:
@@ -190,6 +193,31 @@ strip_quotes() {
     return
   fi
   printf '%s' "$v"
+}
+
+increase_verbosity() {
+  local amount="${1:-1}"
+  VERBOSE_LEVEL=$((VERBOSE_LEVEL + amount))
+  if [[ "$VERBOSE_LEVEL" -gt 3 ]]; then
+    VERBOSE_LEVEL=3
+  fi
+}
+
+import_progress_interval_seconds() {
+  case "$VERBOSE_LEVEL" in
+    0) echo 60 ;;
+    1) echo 30 ;;
+    2) echo 10 ;;
+    *) echo 3 ;;
+  esac
+}
+
+log_verbose() {
+  local level="$1"
+  shift
+  if [[ "$VERBOSE_LEVEL" -ge "$level" ]]; then
+    echo "$@" >&2
+  fi
 }
 
 profile_key() {
@@ -814,6 +842,18 @@ run_import() {
         no_confirm="true"
         shift
         ;;
+      -v|--verbose)
+        increase_verbosity 1
+        shift
+        ;;
+      -vv)
+        increase_verbosity 2
+        shift
+        ;;
+      -vvv)
+        increase_verbosity 3
+        shift
+        ;;
       --help|-h)
         usage_import
         return 0
@@ -915,6 +955,13 @@ run_import() {
     import_label="$local_file_path"
   fi
   confirm_if_needed "Import backup '$import_label' into profile '$profile' ($user@$host:$port/$database)?" "$no_confirm"
+  log_verbose 2 "Import mode: $import_mode"
+  log_verbose 2 "Destination: $user@$host:$port/$database"
+  if [[ "$import_mode" == "id" ]]; then
+    log_verbose 2 "Source: API backup '$filename'"
+  else
+    log_verbose 2 "Source: local file '$local_file_path'"
+  fi
   echo "Starting import of '$import_label' into '$profile'..."
 
   local network_args=()
@@ -924,13 +971,22 @@ run_import() {
 
   local load_sql_from_stream_script=""
   read -r -d '' load_sql_from_stream_script <<'SCRIPT' || true
-set -eu
+set -euo pipefail
 if ! command -v mysql >/dev/null 2>&1; then
   echo "ERROR: No SQL client found: mysql." >&2
   exit 1
 fi
 gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
 SCRIPT
+
+  local progress_interval monitor_pid import_pid import_status started_at now elapsed
+  progress_interval="$(import_progress_interval_seconds)"
+  started_at="$(date +%s)"
+
+  log_verbose 3 "Verbose level: $VERBOSE_LEVEL (progress heartbeat every ${progress_interval}s)"
+  if [[ "$progress_interval" -gt 0 ]]; then
+    echo "Import progress updates enabled (every ${progress_interval}s)." >&2
+  fi
 
   if [[ "$import_mode" == "id" ]]; then
     if [[ "$filename" != *.sql.gz ]]; then
@@ -941,29 +997,75 @@ SCRIPT
 
     local encoded_filename
     encoded_filename="$(url_encode_with_bakker_bun "$filename")"
-    curl -sS --fail-with-body --max-time "$REQUEST_TIMEOUT" \
-      -H "Authorization: Bearer $token" \
-      "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
-      | docker run --rm -i "${network_args[@]}" \
-          -e DEST_PASSWORD="$db_password" \
-          -e DEST_HOST="$host" \
-          -e DEST_PORT="$port" \
-          -e DEST_USER="$user" \
-          -e DEST_DB="$database" \
-          "$BAKKER_IMAGE" \
-          sh -lc "$load_sql_from_stream_script"
+    local download_timeout_args=()
+    if [[ "$REQUEST_TIMEOUT" != "0" && "$REQUEST_TIMEOUT" != "0.0" ]]; then
+      # For large imports, bound connection setup only; do not cap full transfer time.
+      download_timeout_args=(--connect-timeout "$REQUEST_TIMEOUT")
+    fi
+
+    (
+      curl -sS --fail-with-body "${download_timeout_args[@]}" \
+        -H "Authorization: Bearer $token" \
+        "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
+        | docker run --rm -i "${network_args[@]}" \
+            -e DEST_PASSWORD="$db_password" \
+            -e DEST_HOST="$host" \
+            -e DEST_PORT="$port" \
+            -e DEST_USER="$user" \
+            -e DEST_DB="$database" \
+            "$BAKKER_IMAGE" \
+            sh -lc "$load_sql_from_stream_script"
+    ) &
+    import_pid=$!
   else
-    cat "$local_file_path" \
-      | docker run --rm -i "${network_args[@]}" \
-          -e DEST_PASSWORD="$db_password" \
-          -e DEST_HOST="$host" \
-          -e DEST_PORT="$port" \
-          -e DEST_USER="$user" \
-          -e DEST_DB="$database" \
-          "$BAKKER_IMAGE" \
-          sh -lc "$load_sql_from_stream_script"
+    (
+      cat "$local_file_path" \
+        | docker run --rm -i "${network_args[@]}" \
+            -e DEST_PASSWORD="$db_password" \
+            -e DEST_HOST="$host" \
+            -e DEST_PORT="$port" \
+            -e DEST_USER="$user" \
+            -e DEST_DB="$database" \
+            "$BAKKER_IMAGE" \
+            sh -lc "$load_sql_from_stream_script"
+    ) &
+    import_pid=$!
   fi
 
+  monitor_pid=""
+  if [[ "$progress_interval" -gt 0 ]]; then
+    (
+      while kill -0 "$import_pid" >/dev/null 2>&1; do
+        sleep "$progress_interval"
+        if ! kill -0 "$import_pid" >/dev/null 2>&1; then
+          break
+        fi
+        now="$(date +%s)"
+        elapsed=$((now - started_at))
+        echo "Import in progress (${elapsed}s elapsed)..." >&2
+      done
+    ) &
+    monitor_pid=$!
+  fi
+
+  set +e
+  wait "$import_pid"
+  import_status=$?
+  set -e
+
+  if [[ -n "$monitor_pid" ]]; then
+    kill "$monitor_pid" >/dev/null 2>&1 || true
+    wait "$monitor_pid" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$import_status" -ne 0 ]]; then
+    echo "Error: import failed." >&2
+    exit "$import_status"
+  fi
+
+  now="$(date +%s)"
+  elapsed=$((now - started_at))
+  log_verbose 1 "Import finished in ${elapsed}s."
   echo "Import completed successfully."
 }
 
@@ -1077,6 +1179,18 @@ parse_global_options() {
         [[ $# -lt 2 ]] && { echo "Error: --profile requires a value" >&2; exit 2; }
         OVERRIDE_PROFILE="$2"
         shift 2
+        ;;
+      -v|--verbose)
+        increase_verbosity 1
+        shift
+        ;;
+      -vv)
+        increase_verbosity 2
+        shift
+        ;;
+      -vvv)
+        increase_verbosity 3
+        shift
         ;;
       --help|-h)
         usage
