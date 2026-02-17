@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.4"
+VERSION="0.3.5"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
-BAKKER_IMAGE=""
-BAKKER_DOCKER_NETWORK=""
 REQUEST_TIMEOUT=""
 DEFAULT_OUTPUT=""
 DEFAULT_CONFIRM_IMPORT=""
@@ -14,8 +12,6 @@ DEFAULT_PROFILE=""
 VERBOSE_LEVEL=0
 
 OVERRIDE_API_URL=""
-OVERRIDE_IMAGE=""
-OVERRIDE_DOCKER_NETWORK=""
 OVERRIDE_TIMEOUT=""
 OVERRIDE_OUTPUT=""
 OVERRIDE_PROFILE=""
@@ -31,8 +27,6 @@ Usage:
 Global options:
   --config <path>        Path to config.toml (default: ./bakker.config.toml, then ~/.config/bakker/bakker.config.toml)
   --api-url <url>        Override Bakker API URL
-  --image <ref>          Override tooling image (default: sebaswouters/bakker:latest)
-  --docker-network <n>   Optional docker network for image runs
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
   --profile <name>       Default destination profile for import
@@ -90,6 +84,7 @@ Notes:
   - For ID-based imports, Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
   - Destination DB password lookup order: <PROFILE>_DB_PASS env var, then profile password in config, then interactive prompt.
   - Supported import format: .sql.gz.
+  - Imports execute locally and require mysql + gunzip on this machine.
 USAGE
 }
 
@@ -245,6 +240,60 @@ read_stream_progress_bytes() {
   ' "$progress_file"
 }
 
+now_millis() {
+  local ms
+  ms="$(date +%s%3N 2>/dev/null || true)"
+  if [[ "$ms" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$ms"
+    return
+  fi
+  printf '%s000' "$(date +%s)"
+}
+
+elapsed_millis() {
+  local start_ms="$1"
+  local end_ms="${2:-}"
+  if [[ -z "$end_ms" ]]; then
+    end_ms="$(now_millis)"
+  fi
+  if [[ ! "$start_ms" =~ ^[0-9]+$ || ! "$end_ms" =~ ^[0-9]+$ ]]; then
+    printf '0'
+    return
+  fi
+  if [[ "$end_ms" -lt "$start_ms" ]]; then
+    printf '0'
+    return
+  fi
+  printf '%s' "$((end_ms - start_ms))"
+}
+
+format_mib_per_second() {
+  local bytes="$1"
+  local duration_ms="$2"
+  if [[ ! "$bytes" =~ ^[0-9]+$ || ! "$duration_ms" =~ ^[0-9]+$ || "$duration_ms" -le 0 ]]; then
+    printf 'n/a'
+    return
+  fi
+  awk -v b="$bytes" -v ms="$duration_ms" 'BEGIN { printf "%.2f", (b / 1048576) / (ms / 1000) }'
+}
+
+print_import_perf_summary() {
+  local mode="$1"
+  local resolve_ms="$2"
+  local connectivity_ms="$3"
+  local stream_load_ms="$4"
+  local total_ms="$5"
+  local source_size_bytes="$6"
+  local throughput_text=""
+  local mibps
+  mibps="$(format_mib_per_second "$source_size_bytes" "$stream_load_ms")"
+  if [[ "$mibps" != "n/a" ]]; then
+    throughput_text=", throughput ${mibps} MiB/s"
+  fi
+  printf 'Import performance (%s): resolve %sms, connectivity %sms, stream+load %sms, total %sms%s\n' \
+    "$mode" "$resolve_ms" "$connectivity_ms" "$stream_load_ms" "$total_ms" "$throughput_text" >&2
+}
+
 profile_key() {
   local name="$1"
   local key="$2"
@@ -340,8 +389,6 @@ load_config() {
       bakker)
         case "$key" in
           api_url) BAKKER_API_URL="$value" ;;
-          image) BAKKER_IMAGE="$value" ;;
-          docker_network) BAKKER_DOCKER_NETWORK="$value" ;;
           timeout_seconds) REQUEST_TIMEOUT="$value" ;;
         esac
         ;;
@@ -365,19 +412,12 @@ load_config() {
   done < "$CONFIG_PATH"
 
   [[ -z "$BAKKER_API_URL" ]] && BAKKER_API_URL="http://localhost:3500"
-  [[ -z "$BAKKER_IMAGE" ]] && BAKKER_IMAGE="sebaswouters/bakker:latest"
   [[ -z "$REQUEST_TIMEOUT" ]] && REQUEST_TIMEOUT="30"
   [[ -z "$DEFAULT_OUTPUT" ]] && DEFAULT_OUTPUT="table"
   [[ -z "$DEFAULT_CONFIRM_IMPORT" ]] && DEFAULT_CONFIRM_IMPORT="true"
 
   if [[ -n "$OVERRIDE_API_URL" ]]; then
     BAKKER_API_URL="$OVERRIDE_API_URL"
-  fi
-  if [[ -n "$OVERRIDE_IMAGE" ]]; then
-    BAKKER_IMAGE="$OVERRIDE_IMAGE"
-  fi
-  if [[ -n "$OVERRIDE_DOCKER_NETWORK" ]]; then
-    BAKKER_DOCKER_NETWORK="$OVERRIDE_DOCKER_NETWORK"
   fi
   if [[ -n "$OVERRIDE_TIMEOUT" ]]; then
     REQUEST_TIMEOUT="$OVERRIDE_TIMEOUT"
@@ -402,7 +442,7 @@ require_cmd() {
 
 require_runtime() {
   require_cmd curl
-  require_cmd docker
+  require_cmd jq
 }
 
 get_auth_token() {
@@ -488,147 +528,122 @@ api_request() {
   rm -f "$tmp_file"
 }
 
-json_transform_with_bakker_bun() {
-  local js_code="$1"
-  docker_run_tool bun -e "$js_code"
-}
-
-url_encode_with_bakker_bun() {
+url_encode() {
   local raw="$1"
-  printf '%s' "$raw" | docker_run_tool bun -e 'const fs=require("fs"); const s=fs.readFileSync(0, "utf8"); process.stdout.write(encodeURIComponent(s));'
-}
-
-docker_run_tool() {
-  local network_args=()
-  local env_args=()
-  local var_name
-  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
-    network_args=(--network "$BAKKER_DOCKER_NETWORK")
-  fi
-
-  # json transforms run inside a container, so forward lookup/filter vars explicitly.
-  for var_name in BACKUP_ID DB_FILTER LATEST_ONLY; do
-    if [[ -v "$var_name" ]]; then
-      env_args+=(-e "$var_name=${!var_name}")
-    fi
+  local length i c encoded=""
+  length=${#raw}
+  for ((i = 0; i < length; i++)); do
+    c="${raw:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) encoded+="$c" ;;
+      *)
+        printf -v hex '%02X' "'$c"
+        encoded+="%$hex"
+        ;;
+    esac
   done
-
-  docker run --rm -i "${network_args[@]}" "${env_args[@]}" "$BAKKER_IMAGE" "$@"
+  printf '%s' "$encoded"
 }
 
 print_backups_table() {
   local json_data="$1"
   local filter_db="$2"
   local latest_only="$3"
-
-  local js_code
-  js_code='const fs=require("fs");
-const input=fs.readFileSync(0,"utf8");
-const dbFilter=process.env.DB_FILTER||"";
-const latest=(process.env.LATEST_ONLY||"false")==="true";
-let parsed={};
-try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
-const rows=[];
-for (const [db,list] of Object.entries(parsed)) {
-  if (!Array.isArray(list)) continue;
-  for (const item of list) {
-    const parsedId=Number(item?.id);
-    rows.push({
-      id:Number.isInteger(parsedId) && parsedId>0 ? parsedId : null,
-      db,
-      date:item?.date||"",
-      size:item?.sizeHuman||item?.sizeMB||"",
-      name:item?.filename||""
-    });
-  }
-}
-rows.sort((a,b)=>{
-  if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
-  return a.db.localeCompare(b.db);
-});
-const outputRows=[];
-const latestSeen=new Set();
-for (const row of rows) {
-  if (dbFilter && row.db!==dbFilter) continue;
-  if (latest) {
-    if (latestSeen.has(row.db)) continue;
-    latestSeen.add(row.db);
-  }
-  outputRows.push(row);
-}
-console.log("ID\tNAME\tDATE\tDB\tSIZE");
-for (const r of outputRows) {
-  const idDisplay=r.id===null ? "-" : String(r.id);
-  console.log(`${idDisplay}\t${r.name}\t${r.date}\t${r.db}\t${r.size}`);
-}'
+  local latest_flag="false"
+  if [[ "$latest_only" == "true" ]]; then
+    latest_flag="true"
+  fi
 
   while IFS=$'\t' read -r col1 col2 col3 col4 col5; do
     printf '%-5s %-48s %-19s %-20s %s\n' "$col1" "$col2" "$col3" "$col4" "$col5"
   done < <(
-    printf '%s' "$json_data" | DB_FILTER="$filter_db" LATEST_ONLY="$latest_only" json_transform_with_bakker_bun "$js_code"
+    {
+      echo -e "ID\tNAME\tDATE\tDB\tSIZE"
+      printf '%s' "$json_data" \
+        | jq -r '
+            to_entries[]
+            | .key as $db
+            | (.value // [])[]
+            | [
+                (
+                  if (.id | tonumber?) == null then "-"
+                  elif (.id | tonumber) > 0 then ((.id | tonumber) | tostring)
+                  else "-"
+                  end
+                ),
+                (.filename // ""),
+                (.date // ""),
+                $db,
+                (
+                  if (.sizeHuman // "") != "" then .sizeHuman
+                  elif (.sizeMB // "") != "" then (.sizeMB | tostring)
+                  else ""
+                  end
+                )
+              ]
+            | @tsv
+        '
+    } \
+      | awk -F'\t' -v latest="$latest_flag" -v db_filter="$filter_db" '
+          NR == 1 { print; next }
+          db_filter != "" && $4 != db_filter { next }
+          { print }
+        ' \
+      | {
+          IFS= read -r header
+          printf '%s\n' "$header"
+          sort -t$'\t' -k4,4 -k3,3r \
+            | awk -F'\t' -v latest="$latest_flag" '
+                latest != "true" { print; next }
+                !seen[$4]++ { print }
+              '
+        }
   )
 }
 
 resolve_backup_file_by_id() {
   local json_data="$1"
   local backup_id="$2"
-  local js_code
-
-  js_code='const fs=require("fs");
-const input=fs.readFileSync(0,"utf8");
-const rawId=process.env.BACKUP_ID||"";
-const backupId=Number.parseInt(rawId, 10);
-if (!Number.isInteger(backupId) || backupId < 1) {
-  process.exit(2);
-}
-let parsed={};
-try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
-const rows=[];
-for (const [db,list] of Object.entries(parsed)) {
-  if (!Array.isArray(list)) continue;
-  for (const item of list) {
-    const parsedId=Number(item?.id);
-    rows.push({
-      id:Number.isInteger(parsedId) && parsedId>0 ? parsedId : null,
-      db,
-      date:item?.date||"",
-      file:item?.filename||"",
-      size:Number.isFinite(Number(item?.size)) && Number(item?.size) > 0 ? String(Math.trunc(Number(item?.size))) : ""
-    });
-  }
-}
-rows.sort((a,b)=>{
-  if (a.db===b.db) return (b.date||"").localeCompare(a.date||"");
-  return a.db.localeCompare(b.db);
-});
-const selected=rows.find((row) => row.id===backupId);
-if (!selected || !selected.file) process.exit(2);
-process.stdout.write(`${selected.file}\t${selected.db}\t${selected.size}`);'
-
-  printf '%s' "$json_data" | BACKUP_ID="$backup_id" json_transform_with_bakker_bun "$js_code"
+  printf '%s' "$json_data" \
+    | jq -r --argjson id "$backup_id" '
+        [
+          to_entries[]
+          | .key as $db
+          | (.value // [])[]
+          | select((.id | tonumber?) == $id)
+          | {
+              file: (.filename // ""),
+              db: $db,
+              size: (
+                if (.size | tonumber?) == null then ""
+                else ((.size | tonumber | floor) | tostring)
+                end
+              )
+            }
+        ][0] as $row
+        | if $row == null or ($row.file // "") == "" then
+            empty
+          else
+            "\($row.file)\t\($row.db)\t\($row.size)"
+          end
+      '
 }
 
 print_available_server_backup_ids() {
   local json_data="$1"
-  local js_code
-
-  js_code='const fs=require("fs");
-const input=fs.readFileSync(0,"utf8");
-let parsed={};
-try { parsed=JSON.parse(input||"{}"); } catch { parsed={}; }
-const ids=[];
-for (const list of Object.values(parsed)) {
-  if (!Array.isArray(list)) continue;
-  for (const item of list) {
-    const parsedId=Number(item?.id);
-    if (Number.isInteger(parsedId) && parsedId>0) ids.push(parsedId);
-  }
-}
-const unique=[...new Set(ids)].sort((a,b)=>a-b);
-if (unique.length===0) process.exit(0);
-process.stdout.write(unique.join(", "));'
-
-  printf '%s' "$json_data" | json_transform_with_bakker_bun "$js_code"
+  printf '%s' "$json_data" \
+    | jq -r '
+        [
+          to_entries[]
+          | (.value // [])[]
+          | .id
+          | tonumber?
+          | select(. != null and . > 0)
+        ]
+        | unique
+        | sort
+        | if length == 0 then empty else map(tostring) | join(", ") end
+      '
 }
 
 require_profile() {
@@ -784,9 +799,7 @@ get_profile_db_password() {
 print_connectivity_hint() {
   local host="$1"
   if [[ "$host" == "127.0.0.1" || "$host" == "localhost" || "$host" == "::1" ]]; then
-    echo "Hint: destination host '$host' is loopback inside the Docker restore container." >&2
-    echo "On Linux, set [bakker].docker_network = \"host\" to reach your host-local DB." >&2
-    echo "Alternative: use a host/IP reachable from Docker (or host.docker.internal where supported)." >&2
+    echo "Hint: destination host '$host' is loopback; verify mysql is listening on that interface and port." >&2
   fi
 }
 
@@ -797,26 +810,45 @@ connectivity_check() {
   local database="$4"
   local password="$5"
 
-  local network_args=()
-  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
-    network_args=(--network "$BAKKER_DOCKER_NETWORK")
+  if ! command -v mysql >/dev/null 2>&1; then
+    return 1
   fi
 
-  docker run --rm "${network_args[@]}" \
-    -e DEST_HOST="$host" \
-    -e DEST_PORT="$port" \
-    -e DEST_USER="$user" \
-    -e DEST_DB="$database" \
-    -e DEST_PASSWORD="$password" \
-    "$BAKKER_IMAGE" \
-    sh -lc '
-      set -eu
-      if ! command -v mysql >/dev/null 2>&1; then
-        echo "No SQL client found: mysql." >&2
-        exit 1
-      fi
-      MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" -D "$DEST_DB" -e "SELECT 1;" >/dev/null
-    '
+  MYSQL_PWD="$password" mysql -h "$host" -P "$port" -u "$user" -D "$database" -e "SELECT 1;" >/dev/null 2>&1
+}
+
+json_get_string_field() {
+  local json="$1"
+  local field="$2"
+  local value=""
+
+  if command -v jq >/dev/null 2>&1; then
+    value="$(printf '%s' "$json" | jq -r --arg f "$field" '.[$f] // ""' 2>/dev/null || true)"
+    if [[ "$value" != "null" ]]; then
+      printf '%s' "$value"
+      return
+    fi
+  fi
+
+  value="$(printf '%s' "$json" | tr -d '\r\n' | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p")"
+  printf '%s' "$value"
+}
+
+json_get_number_field() {
+  local json="$1"
+  local field="$2"
+  local value=""
+
+  if command -v jq >/dev/null 2>&1; then
+    value="$(printf '%s' "$json" | jq -r --arg f "$field" '.[$f] // ""' 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$value"
+      return
+    fi
+  fi
+
+  value="$(printf '%s' "$json" | tr -d '\r\n' | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p")"
+  printf '%s' "$value"
 }
 
 run_import() {
@@ -924,6 +956,16 @@ run_import() {
   local import_mode=""
   local local_file_path=""
   local token=""
+  local run_started_ms resolve_started_ms resolve_ms connectivity_started_ms connectivity_ms
+  local import_started_ms import_ms total_ms
+  run_started_ms="$(now_millis)"
+  resolve_started_ms="$run_started_ms"
+  resolve_ms=0
+  connectivity_ms=0
+  import_ms=0
+  total_ms=0
+  require_cmd mysql
+  require_cmd gunzip
   if [[ "$force_local_file" != "true" && "$import_arg" =~ ^[0-9]+$ ]]; then
     if [[ "$import_arg" -lt 1 ]]; then
       echo "Error: <id> must be a positive integer from 'bakker backup list'." >&2
@@ -931,22 +973,48 @@ run_import() {
     fi
     import_mode="id"
     local backup_id="$import_arg"
-    local backups_json resolved
+    local backup_meta_json backups_json available_ids
+    local resolve_tmp resolve_status request_url
     token="$(get_auth_token)"
-    backups_json="$(api_request GET "/api/backups" "$token")"
-    if ! resolved="$(resolve_backup_file_by_id "$backups_json" "$backup_id")"; then
-      echo "Error: no backup found for ID '$backup_id'." >&2
-      echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
-      local available_ids
-      available_ids="$(print_available_server_backup_ids "$backups_json" || true)"
-      if [[ -n "$available_ids" ]]; then
-        echo "Server IDs currently available: $available_ids" >&2
+    resolve_tmp="$(mktemp)"
+    request_url="$(normalize_api_url "$BAKKER_API_URL")/api/backups/by-id/$backup_id"
+    resolve_status="$(curl -sS -o "$resolve_tmp" -w '%{http_code}' --max-time "$REQUEST_TIMEOUT" \
+      -H "Authorization: Bearer $token" \
+      "$request_url")" || {
+        rm -f "$resolve_tmp"
+        echo "Error: request failed: GET $request_url" >&2
+        exit 4
+      }
+    if [[ "$resolve_status" -eq 404 ]]; then
+      rm -f "$resolve_tmp"
+      backups_json="$(api_request GET "/api/backups" "$token")"
+      local resolved_backup_row
+      resolved_backup_row="$(resolve_backup_file_by_id "$backups_json" "$backup_id" || true)"
+      if [[ -n "$resolved_backup_row" ]]; then
+        IFS=$'\t' read -r filename selected_db selected_size_bytes <<<"$resolved_backup_row"
       else
-        echo "The server response did not contain usable backup IDs." >&2
+        echo "Error: no backup found for ID '$backup_id'." >&2
+        echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
+        available_ids="$(print_available_server_backup_ids "$backups_json" || true)"
+        if [[ -n "$available_ids" ]]; then
+          echo "Server IDs currently available: $available_ids" >&2
+        else
+          echo "The server response did not contain usable backup IDs." >&2
+        fi
+        exit 4
       fi
+    elif [[ "$resolve_status" -ge 400 ]]; then
+      echo "Error: API returned HTTP $resolve_status for GET /api/backups/by-id/$backup_id" >&2
+      cat "$resolve_tmp" >&2
+      rm -f "$resolve_tmp"
       exit 4
+    else
+      backup_meta_json="$(cat "$resolve_tmp")"
+      filename="$(json_get_string_field "$backup_meta_json" "filename")"
+      selected_db="$(json_get_string_field "$backup_meta_json" "database")"
+      selected_size_bytes="$(json_get_number_field "$backup_meta_json" "size")"
+      rm -f "$resolve_tmp"
     fi
-    IFS=$'\t' read -r filename selected_db selected_size_bytes <<<"$resolved"
     if [[ -z "$filename" ]]; then
       echo "Error: backup ID '$backup_id' resolved to an empty filename." >&2
       exit 4
@@ -974,16 +1042,22 @@ run_import() {
     fi
     echo "Using local import file '$local_file_path'."
   fi
+  resolve_ms="$(elapsed_millis "$resolve_started_ms")"
 
   local db_password
   db_password="$(get_profile_db_password "$profile")"
 
   echo "Checking destination connectivity for profile '$profile'..."
+  connectivity_started_ms="$(now_millis)"
   if ! connectivity_check "$host" "$port" "$user" "$database" "$db_password"; then
+    connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
+    total_ms="$(elapsed_millis "$run_started_ms")"
+    log_verbose 1 "Import performance (pre-failure): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, total ${total_ms}ms"
     echo "Error: failed to connect to destination DB ($user@$host:$port/$database)." >&2
     print_connectivity_hint "$host"
     exit 5
   fi
+  connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
 
   local import_label="$filename"
   if [[ "$import_mode" == "local-file" ]]; then
@@ -997,12 +1071,8 @@ run_import() {
   else
     log_verbose 2 "Source: local file '$local_file_path'"
   fi
+  log_verbose 2 "Execution client: local mysql"
   echo "Starting import of '$import_label' into '$profile'..."
-
-  local network_args=()
-  if [[ -n "$BAKKER_DOCKER_NETWORK" ]]; then
-    network_args=(--network "$BAKKER_DOCKER_NETWORK")
-  fi
 
   local load_sql_from_stream_script=""
   read -r -d '' load_sql_from_stream_script <<'SCRIPT' || true
@@ -1044,15 +1114,24 @@ if [ "${TRACK_TABLE_PROGRESS:-0}" = "1" ] && [ -n "${STATUS_FILE:-}" ] && comman
         print
       }
     ' \
-    | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
+    | MYSQL_PWD="$DEST_PASSWORD" mysql \
+        --binary-mode \
+        --default-character-set=utf8mb4 \
+        --init-command="SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'" \
+        -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
 else
-  gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
+  gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql \
+      --binary-mode \
+      --default-character-set=utf8mb4 \
+      --init-command="SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'" \
+      -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
 fi
 SCRIPT
 
   local progress_interval monitor_pid import_pid import_status started_at now elapsed
   local progress_tmp_dir="" stream_progress_file="" table_progress_file=""
   local track_stream_bytes="false" track_table_progress="false"
+  local import_interrupted="false"
   progress_interval="$(import_progress_interval_seconds)"
   started_at="$(date +%s)"
 
@@ -1076,22 +1155,26 @@ SCRIPT
     fi
   fi
 
-  local docker_import_args=(--rm -i "${network_args[@]}")
-  docker_import_args+=(
-    -e DEST_PASSWORD="$db_password"
-    -e DEST_HOST="$host"
-    -e DEST_PORT="$port"
-    -e DEST_USER="$user"
-    -e DEST_DB="$database"
-  )
+  local host_track_flag="0"
   if [[ "$track_table_progress" == "true" ]]; then
-    docker_import_args+=(
-      -v "$progress_tmp_dir:/progress"
-      -e TRACK_TABLE_PROGRESS=1
-      -e STATUS_FILE=/progress/current-table.txt
-    )
+    host_track_flag="1"
   fi
 
+  trap '
+    import_interrupted="true"
+    echo "Import interrupted; stopping active transfer..." >&2
+    if [[ -n "${monitor_pid:-}" ]]; then
+      kill "$monitor_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${import_pid:-}" ]]; then
+      if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -P "$import_pid" >/dev/null 2>&1 || true
+      fi
+      kill "$import_pid" >/dev/null 2>&1 || true
+    fi
+  ' INT TERM
+
+  import_started_ms="$(now_millis)"
   if [[ "$import_mode" == "id" ]]; then
     if [[ "$filename" != *.sql.gz ]]; then
       echo "Error: unsupported server backup format for '$filename'." >&2
@@ -1100,7 +1183,7 @@ SCRIPT
     fi
 
     local encoded_filename
-    encoded_filename="$(url_encode_with_bakker_bun "$filename")"
+    encoded_filename="$(url_encode "$filename")"
     local download_timeout_args=()
     if [[ "$REQUEST_TIMEOUT" != "0" && "$REQUEST_TIMEOUT" != "0.0" ]]; then
       # For large imports, bound connection setup only; do not cap full transfer time.
@@ -1113,24 +1196,50 @@ SCRIPT
           -H "Authorization: Bearer $token" \
           "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
           | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
-          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+          | TRACK_TABLE_PROGRESS="$host_track_flag" \
+              STATUS_FILE="$table_progress_file" \
+              DEST_PASSWORD="$db_password" \
+              DEST_HOST="$host" \
+              DEST_PORT="$port" \
+              DEST_USER="$user" \
+              DEST_DB="$database" \
+              bash -lc "$load_sql_from_stream_script"
       else
         curl -sS --fail-with-body "${download_timeout_args[@]}" \
           -H "Authorization: Bearer $token" \
           "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
-          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+          | TRACK_TABLE_PROGRESS="$host_track_flag" \
+              STATUS_FILE="$table_progress_file" \
+              DEST_PASSWORD="$db_password" \
+              DEST_HOST="$host" \
+              DEST_PORT="$port" \
+              DEST_USER="$user" \
+              DEST_DB="$database" \
+              bash -lc "$load_sql_from_stream_script"
       fi
     ) &
     import_pid=$!
   else
     (
       if [[ "$track_stream_bytes" == "true" ]]; then
-        cat "$local_file_path" \
-          | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
-          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+        tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") < "$local_file_path" \
+          | TRACK_TABLE_PROGRESS="$host_track_flag" \
+              STATUS_FILE="$table_progress_file" \
+              DEST_PASSWORD="$db_password" \
+              DEST_HOST="$host" \
+              DEST_PORT="$port" \
+              DEST_USER="$user" \
+              DEST_DB="$database" \
+              bash -lc "$load_sql_from_stream_script"
       else
-        cat "$local_file_path" \
-          | docker run "${docker_import_args[@]}" "$BAKKER_IMAGE" bash -lc "$load_sql_from_stream_script"
+        TRACK_TABLE_PROGRESS="$host_track_flag" \
+          STATUS_FILE="$table_progress_file" \
+          DEST_PASSWORD="$db_password" \
+          DEST_HOST="$host" \
+          DEST_PORT="$port" \
+          DEST_USER="$user" \
+          DEST_DB="$database" \
+          bash -lc "$load_sql_from_stream_script" < "$local_file_path"
       fi
     ) &
     import_pid=$!
@@ -1208,15 +1317,28 @@ SCRIPT
   if [[ -n "$progress_tmp_dir" && -d "$progress_tmp_dir" ]]; then
     rm -rf "$progress_tmp_dir"
   fi
+  trap - INT TERM
+  import_ms="$(elapsed_millis "$import_started_ms")"
+  total_ms="$(elapsed_millis "$run_started_ms")"
+
+  if [[ "$import_interrupted" == "true" ]]; then
+    log_verbose 1 "Import performance (interrupted): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, stream+load ${import_ms}ms, total ${total_ms}ms"
+    echo "Import cancelled."
+    exit 130
+  fi
 
   if [[ "$import_status" -ne 0 ]]; then
+    log_verbose 1 "Import performance (failure): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, stream+load ${import_ms}ms, total ${total_ms}ms"
     echo "Error: import failed." >&2
     exit "$import_status"
   fi
 
+  if [[ "$VERBOSE_LEVEL" -ge 1 ]]; then
+    print_import_perf_summary "${import_mode}/local-mysql" "$resolve_ms" "$connectivity_ms" "$import_ms" "$total_ms" "$source_size_bytes"
+  fi
   now="$(date +%s)"
   elapsed=$((now - started_at))
-  log_verbose 1 "Import finished in ${elapsed}s."
+  log_verbose 1 "Import finished in ${import_ms}ms (heartbeat elapsed ${elapsed}s)."
   echo "Import completed successfully."
 }
 
@@ -1255,25 +1377,16 @@ doctor() {
 
   require_runtime
   echo "- curl: ok"
-  echo "- docker: ok"
+  echo "- jq: ok"
+  require_cmd mysql
+  echo "- mysql: ok"
+  require_cmd gunzip
+  echo "- gunzip: ok"
 
   if [[ -f "$CONFIG_PATH" ]]; then
     echo "- config: ok ($CONFIG_PATH)"
   else
     echo "- config: missing ($CONFIG_PATH)"
-    exit 3
-  fi
-
-  if docker image inspect "$BAKKER_IMAGE" >/dev/null 2>&1; then
-    echo "- image '$BAKKER_IMAGE': available"
-  else
-    echo "- image '$BAKKER_IMAGE': not present locally (will be pulled on first run)"
-  fi
-
-  if docker run --rm "$BAKKER_IMAGE" true >/dev/null 2>&1; then
-    echo "- image run: ok"
-  else
-    echo "- image run: failed (check image name, network, and registry access)"
     exit 3
   fi
 
@@ -1285,7 +1398,7 @@ doctor() {
     return 0
   fi
 
-  if api_request GET "/api/auth-required" "$token" >/dev/null; then
+  if api_request GET "/api/status" "$token" >/dev/null; then
     echo "- API auth: ok"
   else
     echo "- API auth: failed"
@@ -1304,16 +1417,6 @@ parse_global_options() {
       --api-url)
         [[ $# -lt 2 ]] && { echo "Error: --api-url requires a value" >&2; exit 2; }
         OVERRIDE_API_URL="$2"
-        shift 2
-        ;;
-      --image)
-        [[ $# -lt 2 ]] && { echo "Error: --image requires a value" >&2; exit 2; }
-        OVERRIDE_IMAGE="$2"
-        shift 2
-        ;;
-      --docker-network)
-        [[ $# -lt 2 ]] && { echo "Error: --docker-network requires a value" >&2; exit 2; }
-        OVERRIDE_DOCKER_NETWORK="$2"
         shift 2
         ;;
       --timeout)

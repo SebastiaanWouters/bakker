@@ -6,9 +6,10 @@
 
 ## Requirements
 
-- `docker`
 - `curl`
-- access to Docker image `sebaswouters/bakker:latest` (or override image)
+- `jq`
+- `mysql`
+- `gunzip`
 
 ## Install
 
@@ -59,8 +60,6 @@ cp cli/config.toml.example ~/.config/bakker/bakker.config.toml
 
 Config includes all non-secret options:
 - Bakker URL
-- tooling image
-- optional docker network for image runs
 - output/confirmation defaults
 - optional default import profile
 - destination DB profiles
@@ -73,15 +72,6 @@ For import destination passwords:
   2) `password` in `[profiles.<name>]` from config
   3) interactive prompt
 - Example: profile `local-dev` -> `LOCAL_DEV_DB_PASS`.
-
-For local DBs on Linux (`host = "127.0.0.1"` or `localhost`), set:
-
-```toml
-[bakker]
-docker_network = "host"
-```
-
-This lets the Docker restore container reach your host-local database.
 
 ## Auth Token
 
@@ -137,6 +127,6 @@ cli/bakker doctor
 All options can be configured in TOML and overridden by CLI flags:
 
 ```bash
-cli/bakker --config /path/config.toml --api-url http://127.0.0.1:3500 --image sebaswouters/bakker:latest backup list
+cli/bakker --config /path/config.toml --api-url http://127.0.0.1:3500 backup list
 cli/bakker --profile local_dev import 3
 ```

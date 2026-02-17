@@ -1,7 +1,5 @@
 [bakker]
 api_url = "http://localhost:3500"
-image = "sebaswouters/bakker:latest"
-# docker_network = "host"
 timeout_seconds = 30
 
 [defaults]
@@ -11,9 +9,6 @@ confirm_import = true
 # profile = "local_dev"
 
 [profiles.local_dev]
-# If the destination DB is on your Linux host machine (localhost),
-# keep this as 127.0.0.1 and set [bakker].docker_network = "host" above.
-# On Docker Desktop, you can also use host.docker.internal.
 host = "127.0.0.1"
 port = 3306
 user = "restore_user"

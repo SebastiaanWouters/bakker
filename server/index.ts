@@ -25,6 +25,7 @@ const HOST = process.env.HOST || "::";
 const AUTH_TOKEN = process.env.AUTH_TOKEN || "";
 const ENCRYPTION_SECRET = process.env.ENCRYPTION_SECRET || "";
 const DEV = process.env.DEV === "1";
+const LOG_DOWNLOAD_PERF = process.env.LOG_DOWNLOAD_PERF === "1";
 const BACKUP_DIR = "/data/backups";
 const CONFIG_FILE = "/data/config/config.json";
 const TEMPLATES_FILE = "/data/config/templates.json";
@@ -677,35 +678,97 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function wrapDownloadStreamWithPerfLogging(
+  filename: string,
+  sourceStream: ReadableStream<Uint8Array>,
+  expectedBytes: number,
+): ReadableStream<Uint8Array> {
+  const startedAt = Date.now();
+  let transferredBytes = 0;
+  let logged = false;
+  const reader = sourceStream.getReader();
+
+  const logFinal = (status: "completed" | "cancelled" | "errored") => {
+    if (logged) return;
+    logged = true;
+    const elapsedMs = Math.max(Date.now() - startedAt, 1);
+    const mibPerSecond = (transferredBytes / 1048576) / (elapsedMs / 1000);
+    console.log(
+      `[download] ${status} file=${filename} bytes=${transferredBytes} expected=${expectedBytes} elapsed_ms=${elapsedMs} mib_per_s=${mibPerSecond.toFixed(2)}`,
+    );
+  };
+
+  console.log(
+    `[download] started file=${filename} expected=${expectedBytes}`,
+  );
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          logFinal("completed");
+          controller.close();
+          return;
+        }
+        if (value) {
+          transferredBytes += value.byteLength;
+          controller.enqueue(value);
+        }
+      } catch (err) {
+        logFinal("errored");
+        controller.error(err);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } catch {
+        // ignore
+      }
+      logFinal("cancelled");
+    },
+  });
+}
+
 async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   const files = await readdir(BACKUP_DIR);
   files.sort();
-  const backupsWithoutIds: Omit<BackupInfo, "id">[] = [];
+  const parsedFiles = files
+    .filter((file) => file.endsWith(".sql.gz"))
+    .map((file) => {
+      // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
+      // Greedy match handles underscores in config names
+      const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
+      if (!match) return null;
+      const database = match[1];
+      const dateStr = match[2];
+      const formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)} ${dateStr.slice(9, 11)}:${dateStr.slice(11, 13)}:${dateStr.slice(13, 15)}`;
+      return { file, database, formattedDate };
+    })
+    .filter((item): item is { file: string; database: string; formattedDate: string } => item !== null);
 
-  for (const file of files) {
-    if (!file.endsWith(".sql.gz")) continue;
-
-    const filePath = join(BACKUP_DIR, file);
-    const fileStat = await stat(filePath);
-
-    // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
-    // Greedy match handles underscores in config names
-    const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
-    if (!match) continue;
-
-    const database = match[1];
-    const dateStr = match[2];
-    const formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)} ${dateStr.slice(9, 11)}:${dateStr.slice(11, 13)}:${dateStr.slice(13, 15)}`;
-
-    backupsWithoutIds.push({
-      filename: file,
-      size: fileStat.size,
-      sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
-      sizeHuman: formatBytes(fileStat.size),
-      date: formattedDate,
-      database,
-    });
-  }
+  const backupsWithoutIds = (
+    await Promise.all(
+      parsedFiles.map(async ({ file, database, formattedDate }) => {
+        const filePath = join(BACKUP_DIR, file);
+        try {
+          const fileStat = await stat(filePath);
+          if (!fileStat.isFile()) return null;
+          return {
+            filename: file,
+            size: fileStat.size,
+            sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
+            sizeHuman: formatBytes(fileStat.size),
+            date: formattedDate,
+            database,
+          };
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter((item): item is Omit<BackupInfo, "id"> => item !== null);
 
   const backups = await assignBackupIds(backupsWithoutIds);
 
@@ -718,6 +781,21 @@ async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   }
 
   return grouped;
+}
+
+async function findBackupById(backupId: number): Promise<BackupInfo | null> {
+  if (!Number.isInteger(backupId) || backupId < 1) {
+    return null;
+  }
+  const grouped = await listBackups();
+  for (const backups of Object.values(grouped)) {
+    for (const backup of backups) {
+      if (backup.id === backupId) {
+        return backup;
+      }
+    }
+  }
+  return null;
 }
 
 function triggerBackup(
@@ -1059,6 +1137,20 @@ const server = Bun.serve({
       return json(backups);
     }
 
+    // GET /api/backups/by-id/:id
+    if (method === "GET" && path.startsWith("/api/backups/by-id/")) {
+      const rawId = path.slice("/api/backups/by-id/".length);
+      const backupId = Number.parseInt(rawId, 10);
+      if (!Number.isInteger(backupId) || backupId < 1) {
+        return json({ error: "Invalid backup ID" }, 400);
+      }
+      const backup = await findBackupById(backupId);
+      if (!backup) {
+        return json({ error: "Backup not found" }, 404);
+      }
+      return json(backup);
+    }
+
     // GET /api/backups/:filename - download
     if (method === "GET" && path.startsWith("/api/backups/")) {
       const filename = decodeURIComponent(path.slice("/api/backups/".length));
@@ -1076,7 +1168,11 @@ const server = Bun.serve({
         return json({ error: "Backup not found" }, 404);
       }
       const file = Bun.file(filePath);
-      return new Response(file.stream(), {
+      const stream = file.stream();
+      const responseStream = LOG_DOWNLOAD_PERF
+        ? wrapDownloadStreamWithPerfLogging(filename, stream, fileInfo.size)
+        : stream;
+      return new Response(responseStream, {
         headers: {
           "Content-Type": "application/gzip",
           "Content-Disposition": `attachment; filename="${filename}"`,

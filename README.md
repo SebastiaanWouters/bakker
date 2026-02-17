@@ -113,7 +113,7 @@ A companion CLI is available at `cli/bakker`.
 It supports:
 - listing backups from the API
 - importing a backup into configured target DB profiles
-- running restore tooling via `docker run --rm` (no pre-running Bakker container required)
+- importing with local `mysql` + `gunzip` tooling
 
 Install (one-liner):
 
@@ -144,7 +144,7 @@ Auth:
   2) `password` in `[profiles.<name>]` in CLI config
   3) interactive prompt
 
-For host-local DB imports on Linux (`127.0.0.1`/`localhost` profile host), set `docker_network = "host"` in `[bakker]` so the Docker restore container can reach the host DB.
+CLI import requirements: `curl`, `jq`, `mysql`, and `gunzip` must be available locally.
 
 Examples:
 
