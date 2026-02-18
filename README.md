@@ -156,7 +156,6 @@ cli/bakker backup download 3
 cli/bakker -vv backup download --output ./tmp/latest.sql.gz 3
 cli/bakker import --profile local_dev 3
 cli/bakker import -v --profile local_dev 3
-cli/bakker import --skip-connectivity-check --profile local_dev 3
 cli/bakker -vvv import --profile local_dev 3
 cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```

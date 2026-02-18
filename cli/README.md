@@ -113,7 +113,6 @@ Import backup:
 cli/bakker backup list
 cli/bakker import --profile local_dev 3
 cli/bakker import -v --profile local_dev 3
-cli/bakker import --skip-connectivity-check --profile local_dev 3
 cli/bakker import -vvv --profile local_dev 3
 cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.sql.gz
 ```
@@ -129,7 +128,6 @@ Use verbosity levels based on detail/perf tradeoff:
 - `-vvv`: heartbeat + stream percentage + current-table tracker
 
 For ID-based imports, the CLI streams download directly into `mysql` without writing a temporary `.sql.gz` file.
-Use `--skip-connectivity-check` when you want the lowest startup latency and can accept connection errors being reported later by `mysql`.
 
 Profile commands:
 

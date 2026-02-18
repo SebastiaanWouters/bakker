@@ -106,7 +106,7 @@ Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
   --yes             Skip import confirmation prompt
   --skip-connectivity-check
-                    Skip preflight DB ping and start streaming immediately
+                    Skip MySQL auth preflight; keep a fast socket reachability check
   -v|-vv|-vvv       Progress levels: heartbeat only, +stream %, +table tracker
   --help, -h        Show this help
 
@@ -1247,6 +1247,24 @@ connectivity_check() {
   MYSQL_PWD="$password" mysql -h "$host" -P "$port" -u "$user" -D "$database" -e "SELECT 1;" >/dev/null 2>&1
 }
 
+connectivity_check_fast_socket() {
+  local host="$1"
+  local port="$2"
+
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 2 "$host" "$port" >/dev/null 2>&1
+    return $?
+  fi
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 2 bash -c "exec 3<>/dev/tcp/$host/$port" >/dev/null 2>&1
+    return $?
+  fi
+
+  # No lightweight socket probe available; treat as pass and rely on mysql for errors.
+  return 0
+}
+
 json_get_string_field() {
   local json="$1"
   local field="$2"
@@ -1498,8 +1516,18 @@ run_import() {
   db_password="$(get_profile_db_password "$profile")"
 
   if [[ "$skip_connectivity_check" == "true" ]]; then
-    log_verbose 1 "Skipping connectivity preflight check for faster startup."
-    connectivity_ms=0
+    echo "Running fast destination reachability check for profile '$profile'..." >&2
+    connectivity_started_ms="$(now_millis)"
+    if ! connectivity_check_fast_socket "$host" "$port"; then
+      connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
+      total_ms="$(elapsed_millis "$run_started_ms")"
+      log_verbose 1 "Import performance (pre-failure): resolve ${resolve_ms}ms, fast-connectivity ${connectivity_ms}ms, total ${total_ms}ms"
+      echo "Error: destination appears unreachable ($host:$port)." >&2
+      print_connectivity_hint "$host"
+      exit 5
+    fi
+    connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
+    log_verbose 1 "Skipped MySQL auth preflight; socket reachability check passed."
   else
     echo "Checking destination connectivity for profile '$profile'..."
     connectivity_started_ms="$(now_millis)"
