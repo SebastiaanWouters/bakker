@@ -161,6 +161,7 @@ cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.
 ```
 
 For ID-based imports, the CLI streams download directly into local `mysql` (no temp archive on disk).
+By default, `import` drops and recreates the destination database first; pass `--no-drop` to disable.
 
 For full CLI usage, see `cli/README.md`.
 

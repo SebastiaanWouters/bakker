@@ -121,6 +121,9 @@ cli/bakker import --profile local_dev ./Downloads/scone_preview_20260212_080001.
 - a backup ID from `backup list`, or
 - a local SQL dump archive (`.sql.gz`) path (relative paths are resolved from your current directory).
 
+By default, `import` drops and recreates the destination database before loading the dump.
+Use `--no-drop` to keep the existing schema/data and import over current state.
+
 Imports print start/end status by default.
 Use verbosity levels based on detail/perf tradeoff:
 - `-v`: faster heartbeat-only updates

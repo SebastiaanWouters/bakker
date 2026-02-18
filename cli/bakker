@@ -100,13 +100,14 @@ USAGE
 usage_import() {
   cat <<'USAGE'
 Usage:
-  bakker import [--profile <name>] [--yes] [--skip-connectivity-check] <id|filename>
+  bakker import [--profile <name>] [--yes] [--skip-connectivity-check] [--no-drop] <id|filename>
 
 Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
   --yes             Skip import confirmation prompt
   --skip-connectivity-check
                     Skip MySQL auth preflight; keep a fast socket reachability check
+  --no-drop         Keep existing destination database objects; import over current state
   -v|-vv|-vvv       Progress levels: heartbeat only, +stream %, +table tracker
   --help, -h        Show this help
 
@@ -116,6 +117,7 @@ Arguments:
 Notes:
   - For ID-based imports, Bakker API token comes from BAKKER_AUTH_TOKEN or interactive prompt.
   - Destination DB password lookup order: <PROFILE>_DB_PASS env var, then profile password in config, then interactive prompt.
+  - By default, import drops and recreates the destination database first (disable with --no-drop).
   - Supported import format: .sql.gz.
   - Imports execute locally and require mysql + gunzip on this machine.
   - ID imports stream directly from Bakker API to mysql (no local temp file).
@@ -1265,6 +1267,42 @@ connectivity_check_fast_socket() {
   return 0
 }
 
+mysql_escape_identifier() {
+  local ident="$1"
+  ident="${ident//\`/\`\`}"
+  printf '%s' "$ident"
+}
+
+reset_destination_database() {
+  local dest_password="$1"
+  local dest_host="$2"
+  local dest_port="$3"
+  local dest_user="$4"
+  local dest_db="$5"
+  local escaped_db create_stmt reset_sql
+  local -a mysql_admin_args=(
+    --binary-mode
+    --default-character-set=utf8mb4
+    --connect-timeout=10
+    -h "$dest_host" -P "$dest_port" -u "$dest_user"
+  )
+
+  escaped_db="$(mysql_escape_identifier "$dest_db")"
+  create_stmt="$(
+    MYSQL_PWD="$dest_password" mysql "${mysql_admin_args[@]}" --batch --skip-column-names \
+      -e "SHOW CREATE DATABASE \`$escaped_db\`;" 2>/dev/null \
+      | awk -F'\t' 'NR == 1 { print $2 }'
+  )"
+
+  if [[ -n "$create_stmt" ]]; then
+    reset_sql="DROP DATABASE IF EXISTS \`$escaped_db\`; ${create_stmt};"
+  else
+    reset_sql="DROP DATABASE IF EXISTS \`$escaped_db\`; CREATE DATABASE \`$escaped_db\`;"
+  fi
+
+  MYSQL_PWD="$dest_password" mysql "${mysql_admin_args[@]}" -e "$reset_sql"
+}
+
 json_get_string_field() {
   local json="$1"
   local field="$2"
@@ -1333,13 +1371,17 @@ mysql_import_from_stdin() {
             print current_table > status_file
             close(status_file)
           }
-          function update_from_line(prefix, line, table_name) {
+          function update_from_line(prefix, line, table_name, remainder, tick_pos) {
             if (index(line, prefix) != 1) {
               return 0
             }
-            table_name = line
-            sub(/^.*`/, "", table_name)
-            sub(/`.*/, "", table_name)
+            # Keep only the table identifier between prefix and next backtick.
+            remainder = substr(line, length(prefix) + 1)
+            tick_pos = index(remainder, "`")
+            if (tick_pos <= 1) {
+              return 0
+            }
+            table_name = substr(remainder, 1, tick_pos - 1)
             update_table(table_name)
             return 1
           }
@@ -1364,6 +1406,7 @@ run_import() {
   local force_local_file="false"
   local no_confirm="false"
   local skip_connectivity_check="false"
+  local drop_before_import="true"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1381,7 +1424,7 @@ run_import() {
         [[ $# -lt 2 ]] && { echo "Error: --file requires a value" >&2; exit 2; }
         if [[ -n "$import_arg" ]]; then
           echo "Error: import accepts exactly one target (<id|filename>)." >&2
-          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] [--skip-connectivity-check] [--no-drop] <id|filename>" >&2
           exit 2
         fi
         import_arg="$2"
@@ -1392,7 +1435,7 @@ run_import() {
         [[ $# -lt 2 ]] && { echo "Error: --from-file requires a value" >&2; exit 2; }
         if [[ -n "$import_arg" ]]; then
           echo "Error: import accepts exactly one target (<id|filename>)." >&2
-          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] [--skip-connectivity-check] [--no-drop] <id|filename>" >&2
           exit 2
         fi
         import_arg="$2"
@@ -1410,6 +1453,10 @@ run_import() {
         ;;
       --skip-connectivity-check)
         skip_connectivity_check="true"
+        shift
+        ;;
+      --no-drop)
+        drop_before_import="false"
         shift
         ;;
       -v|--verbose)
@@ -1435,7 +1482,7 @@ run_import() {
       *)
         if [[ -n "$import_arg" ]]; then
           echo "Error: import accepts exactly one target (<id|filename>)." >&2
-          echo "Usage: bakker import [--profile <name>] [--yes] <id|filename>" >&2
+          echo "Usage: bakker import [--profile <name>] [--yes] [--skip-connectivity-check] [--no-drop] <id|filename>" >&2
           exit 2
         fi
         import_arg="$1"
@@ -1546,7 +1593,11 @@ run_import() {
   if [[ "$import_mode" == "local-file" ]]; then
     import_label="$local_file_path"
   fi
-  confirm_if_needed "Import backup '$import_label' into profile '$profile' ($user@$host:$port/$database)?" "$no_confirm"
+  local confirm_message="Import backup '$import_label' into profile '$profile' ($user@$host:$port/$database)?"
+  if [[ "$drop_before_import" == "true" ]]; then
+    confirm_message="$confirm_message This will DROP and recreate database '$database' first."
+  fi
+  confirm_if_needed "$confirm_message" "$no_confirm"
   log_verbose 2 "Import mode: $import_mode"
   log_verbose 2 "Destination: $user@$host:$port/$database"
   if [[ "$import_mode" == "id" ]]; then
@@ -1555,6 +1606,18 @@ run_import() {
     log_verbose 2 "Source: local file '$local_file_path'"
   fi
   log_verbose 2 "Execution client: local mysql"
+  if [[ "$drop_before_import" == "true" ]]; then
+    echo "Resetting destination database '$database' (drop + recreate)..."
+    if ! reset_destination_database "$db_password" "$host" "$port" "$user" "$database"; then
+      total_ms="$(elapsed_millis "$run_started_ms")"
+      log_verbose 1 "Import performance (pre-failure): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, total ${total_ms}ms"
+      echo "Error: failed to reset destination database '$database' (drop + recreate)." >&2
+      exit 5
+    fi
+    log_verbose 1 "Destination database reset completed."
+  else
+    log_verbose 1 "Destination reset disabled (--no-drop)."
+  fi
   echo "Starting import of '$import_label' into '$profile'..."
 
   local progress_interval monitor_pid import_pid import_status started_at now elapsed
