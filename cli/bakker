@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.6"
+VERSION="0.3.8"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
@@ -270,12 +270,16 @@ read_stream_progress_bytes() {
   if [[ ! -s "$progress_file" ]]; then
     return 0
   fi
-  awk '
-    /bytes/ {
-      raw=$1
-      gsub(/[^0-9]/, "", raw)
-      if (raw ~ /^[0-9]+$/) {
-        value=raw
+  tr '\r' '\n' < "$progress_file" | awk '
+    {
+      for (i = 2; i <= NF; i++) {
+        if ($i == "bytes") {
+          raw=$(i - 1)
+          gsub(/[^0-9]/, "", raw)
+          if (raw ~ /^[0-9]+$/) {
+            value=raw
+          }
+        }
       }
     }
     END {
@@ -283,7 +287,7 @@ read_stream_progress_bytes() {
         printf "%s", value
       }
     }
-  ' "$progress_file"
+  '
 }
 
 now_millis() {
