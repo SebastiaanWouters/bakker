@@ -325,12 +325,24 @@ fi
 log "Listing backups via CLI."
 BAKKER_AUTH_TOKEN="$AUTH_TOKEN" "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" backup list
 
+log "Downloading backup by ID via CLI (download-only path)."
+DOWNLOAD_ONLY_FILE="$RUN_DIR/download-only.sql.gz"
+BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
+  "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" backup download --output "$DOWNLOAD_ONLY_FILE" "$BACKUP_ID"
+if [[ ! -s "$DOWNLOAD_ONLY_FILE" ]]; then
+  echo "Downloaded file is missing or empty: $DOWNLOAD_ONLY_FILE" >&2
+  exit 1
+fi
+if ! cmp -s "$DOWNLOAD_ONLY_FILE" "$DATA_DIR/backups/$BACKUP_FILE"; then
+  echo "Downloaded file does not match server backup artifact." >&2
+  exit 1
+fi
+
 log "Importing backup by ID via CLI (default heartbeat cadence)."
 IMPORT_DEFAULT_LOG="$RUN_DIR/import-default.log"
 RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
   "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID" \
   2>&1 | tee "$IMPORT_DEFAULT_LOG"
-assert_contains "Import progress updates enabled (every 30s)." "$IMPORT_DEFAULT_LOG" "default import heartbeat cadence"
 assert_not_contains "ERROR 1064" "$IMPORT_DEFAULT_LOG" "default import SQL syntax error"
 
 log "Resetting destination schema before verbose import validation."

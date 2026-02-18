@@ -34,6 +34,7 @@ BACKUP_FILE=""
 BACKUP_ID=""
 LOCAL_GZ=""
 LOCAL_SQL=""
+DOWNLOAD_ONLY_GZ=""
 SOURCE_SIGNATURE=""
 RESULTS_FILE="$RUN_DIR/results.tsv"
 
@@ -215,6 +216,21 @@ run_case() {
       {
         RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
           "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$BACKUP_ID"
+      } >"$log_file" 2>&1
+      ;;
+    cli_id_download_skipcheck)
+      {
+        RESTORE_DB_PASS="$DST_PASS" BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
+          "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes --skip-connectivity-check "$BACKUP_ID"
+      } >"$log_file" 2>&1
+      ;;
+    cli_download_then_import)
+      {
+        rm -f "$DOWNLOAD_ONLY_GZ"
+        BAKKER_AUTH_TOKEN="$AUTH_TOKEN" \
+          "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" backup download --force --output "$DOWNLOAD_ONLY_GZ" "$BACKUP_ID"
+        RESTORE_DB_PASS="$DST_PASS" \
+          "$ROOT_DIR/cli/bakker" --config "$CLI_CONFIG" import --profile restore --yes "$DOWNLOAD_ONLY_GZ"
       } >"$log_file" 2>&1
       ;;
     *)
@@ -407,6 +423,7 @@ IFS=$'\t' read -r BACKUP_FILE BACKUP_ID < <(wait_for_backup)
 
 LOCAL_GZ="$RUN_DIR/$BACKUP_FILE"
 LOCAL_SQL="$RUN_DIR/${BACKUP_FILE%.gz}"
+DOWNLOAD_ONLY_GZ="$RUN_DIR/download-only-${BACKUP_FILE}"
 ENCODED_BACKUP_FILE="$(printf '%s' "$BACKUP_FILE" | jq -sRr @uri)"
 curl -fsS -H "Authorization: Bearer $AUTH_TOKEN" "$API_URL/api/backups/$ENCODED_BACKUP_FILE" -o "$LOCAL_GZ"
 gunzip -c "$LOCAL_GZ" >"$LOCAL_SQL"
@@ -418,16 +435,20 @@ for run_index in $(seq 1 "$REPEATS"); do
   run_case "native_gzip_pipe" "$run_index"
   run_case "cli_local_file" "$run_index"
   run_case "cli_id_download" "$run_index"
+  run_case "cli_id_download_skipcheck" "$run_index"
+  run_case "cli_download_then_import" "$run_index"
 done
 
 native_sql_avg="$(calc_avg_ms native_sql)"
 native_gzip_avg="$(calc_avg_ms native_gzip_pipe)"
 cli_local_avg="$(calc_avg_ms cli_local_file)"
 cli_id_avg="$(calc_avg_ms cli_id_download)"
+cli_id_skipcheck_avg="$(calc_avg_ms cli_id_download_skipcheck)"
+cli_download_then_import_avg="$(calc_avg_ms cli_download_then_import)"
 
 printf "\nBenchmark summary (%s rows, %s runs each)\n" "$ROWS" "$REPEATS"
 printf "%-20s %12s %12s %12s\n" "CASE" "AVG_MS" "MIN_MS" "MAX_MS"
-for case_name in native_sql native_gzip_pipe cli_local_file cli_id_download; do
+for case_name in native_sql native_gzip_pipe cli_local_file cli_id_download cli_id_download_skipcheck cli_download_then_import; do
   printf "%-20s %12s %12s %12s\n" \
     "$case_name" \
     "$(calc_avg_ms "$case_name")" \
@@ -438,9 +459,11 @@ done
 printf "\nOverhead vs native_gzip_pipe:\n"
 printf "cli_local_file: %s\n" "$(calc_overhead_percent "$native_gzip_avg" "$cli_local_avg")"
 printf "cli_id_download: %s\n" "$(calc_overhead_percent "$native_gzip_avg" "$cli_id_avg")"
+printf "cli_id_download_skipcheck: %s\n" "$(calc_overhead_percent "$native_gzip_avg" "$cli_id_skipcheck_avg")"
+printf "cli_download_then_import: %s\n" "$(calc_overhead_percent "$native_gzip_avg" "$cli_download_then_import_avg")"
 
 printf "\nInitial bottleneck hint:\n"
-awk -v ng="$native_gzip_avg" -v cl="$cli_local_avg" -v ci="$cli_id_avg" '
+awk -v ng="$native_gzip_avg" -v cl="$cli_local_avg" -v ci="$cli_id_avg" -v cis="$cli_id_skipcheck_avg" -v cdi="$cli_download_then_import_avg" '
   BEGIN {
     if (ng <= 0) {
       print "- insufficient data to infer bottleneck"
@@ -455,6 +478,16 @@ awk -v ng="$native_gzip_avg" -v cl="$cli_local_avg" -v ci="$cli_id_avg" '
       print "- API download path adds notable overhead; investigate web/network throughput."
     } else {
       print "- API download overhead is modest relative to local CLI path."
+    }
+    if (cis < ci * 0.95) {
+      print "- Connectivity preflight check is measurable; use --skip-connectivity-check when you need lowest startup latency."
+    } else {
+      print "- Connectivity preflight check overhead is small relative to total import time."
+    }
+    if (cdi > ci * 1.10) {
+      print "- Download-then-import is notably slower than streaming import by ID; prefer direct streaming unless local archive retention is required."
+    } else {
+      print "- Download-then-import is close to direct streaming; choose based on operational preference."
     }
   }
 '

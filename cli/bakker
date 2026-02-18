@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.5"
+VERSION="0.3.6"
 
 CONFIG_PATH="${BAKKER_CONFIG:-}"
 BAKKER_API_URL=""
@@ -30,11 +30,12 @@ Global options:
   --timeout <seconds>    Override API timeout
   --output <table|json>  Override output format
   --profile <name>       Default destination profile for import
-  -v|-vv|-vvv            Richer and more frequent import progress updates
+  -v|-vv|-vvv            Progress detail for import/download commands
   --help                 Show this help
 
 Commands:
   backup list [--db <name>] [--latest] [--json]                List backups from Bakker API (with IDs)
+  backup download [--output <path>|--stdout] [--force] <id|filename>  Download backup archive only
   import [--profile <name>] [--yes] <id|filename>              Import backup into destination DB
   profiles list                                                 List configured destination profiles
   profiles show <name>                                          Show one destination profile
@@ -49,6 +50,7 @@ Examples:
   bakker --help
   bakker help import
   bakker backup --help
+  bakker backup download --help
   bakker import --help
 USAGE
 }
@@ -57,24 +59,55 @@ usage_backups() {
   cat <<'USAGE'
 Usage:
   bakker backup list [--db <name>] [--latest] [--json]
+  bakker backup download [--output <path>|--stdout] [--force] <id|filename>
 
-Options:
+List options:
   --db <name>    Filter backups to a Bakker database config name
   --latest       Show only latest backup per database (or for --db)
   --json         Print raw API JSON instead of table output
   --help, -h     Show this help
+
+Download options:
+  --output <path>  Write archive to file path (default: ./<filename>)
+  --stdout         Stream archive bytes to stdout
+  --force          Overwrite output file if it already exists
+  -v|-vv|-vvv      Richer and more frequent download progress updates
+  --help, -h       Show this help
+USAGE
+}
+
+usage_backup_download() {
+  cat <<'USAGE'
+Usage:
+  bakker backup download [--output <path>|--stdout] [--force] <id|filename>
+
+Options:
+  --output <path>  Write archive to file path (default: ./<filename>)
+  --stdout         Stream archive bytes to stdout
+  --force          Overwrite output file if it already exists
+  -v|-vv|-vvv      Richer and more frequent download progress updates
+  --help, -h       Show this help
+
+Arguments:
+  <id|filename>    Backup ID from 'bakker backup list', or exact remote filename
+
+Notes:
+  - Auth token comes from BAKKER_AUTH_TOKEN or interactive prompt.
+  - This command only downloads; it does not import into SQL.
 USAGE
 }
 
 usage_import() {
   cat <<'USAGE'
 Usage:
-  bakker import [--profile <name>] [--yes] <id|filename>
+  bakker import [--profile <name>] [--yes] [--skip-connectivity-check] <id|filename>
 
 Options:
   --profile <name>  Destination profile from config.toml (or [defaults].profile)
   --yes             Skip import confirmation prompt
-  -v|-vv|-vvv       Richer and more frequent progress heartbeats during import
+  --skip-connectivity-check
+                    Skip preflight DB ping and start streaming immediately
+  -v|-vv|-vvv       Progress levels: heartbeat only, +stream %, +table tracker
   --help, -h        Show this help
 
 Arguments:
@@ -85,6 +118,7 @@ Notes:
   - Destination DB password lookup order: <PROFILE>_DB_PASS env var, then profile password in config, then interactive prompt.
   - Supported import format: .sql.gz.
   - Imports execute locally and require mysql + gunzip on this machine.
+  - ID imports stream directly from Bakker API to mysql (no local temp file).
 USAGE
 }
 
@@ -116,6 +150,7 @@ command_help() {
   case "$topic" in
     ""|-h|--help) usage ;;
     backup|backups) usage_backups ;;
+    backup-download|download) usage_backup_download ;;
     import) usage_import ;;
     profiles) usage_profiles ;;
     doctor) usage_doctor ;;
@@ -200,10 +235,19 @@ increase_verbosity() {
 
 import_progress_interval_seconds() {
   case "$VERBOSE_LEVEL" in
-    0) echo 30 ;;
+    0) echo 0 ;;
     1) echo 15 ;;
     2) echo 10 ;;
     *) echo 3 ;;
+  esac
+}
+
+download_progress_interval_seconds() {
+  case "$VERBOSE_LEVEL" in
+    0) echo 0 ;;
+    1) echo 10 ;;
+    2) echo 5 ;;
+    *) echo 2 ;;
   esac
 }
 
@@ -629,6 +673,85 @@ resolve_backup_file_by_id() {
       '
 }
 
+resolve_backup_size_by_filename() {
+  local json_data="$1"
+  local filename="$2"
+  printf '%s' "$json_data" \
+    | jq -r --arg f "$filename" '
+        [
+          to_entries[]
+          | (.value // [])[]
+          | select((.filename // "") == $f)
+          | .size
+          | tonumber?
+          | select(. != null and . > 0)
+          | floor
+          | tostring
+        ][0] // ""
+      '
+}
+
+resolve_server_backup_by_id() {
+  local backup_id="$1"
+  local token="$2"
+  local filename=""
+  local selected_db=""
+  local selected_size_bytes=""
+  local backup_meta_json backups_json available_ids
+  local resolve_tmp resolve_status request_url
+
+  resolve_tmp="$(mktemp)"
+  request_url="$(normalize_api_url "$BAKKER_API_URL")/api/backups/by-id/$backup_id"
+  resolve_status="$(curl -sS -o "$resolve_tmp" -w '%{http_code}' --max-time "$REQUEST_TIMEOUT" \
+    -H "Authorization: Bearer $token" \
+    "$request_url")" || {
+      rm -f "$resolve_tmp"
+      echo "Error: request failed: GET $request_url" >&2
+      exit 4
+    }
+
+  if [[ "$resolve_status" -eq 404 ]]; then
+    rm -f "$resolve_tmp"
+    backups_json="$(api_request GET "/api/backups" "$token")"
+    local resolved_backup_row
+    resolved_backup_row="$(resolve_backup_file_by_id "$backups_json" "$backup_id" || true)"
+    if [[ -n "$resolved_backup_row" ]]; then
+      printf '%s\n' "$resolved_backup_row"
+      return 0
+    fi
+    echo "Error: no backup found for ID '$backup_id'." >&2
+    echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
+    available_ids="$(print_available_server_backup_ids "$backups_json" || true)"
+    if [[ -n "$available_ids" ]]; then
+      echo "Server IDs currently available: $available_ids" >&2
+    else
+      echo "The server response did not contain usable backup IDs." >&2
+    fi
+    exit 4
+  fi
+
+  if [[ "$resolve_status" -ge 400 ]]; then
+    echo "Error: API returned HTTP $resolve_status for GET /api/backups/by-id/$backup_id" >&2
+    cat "$resolve_tmp" >&2
+    rm -f "$resolve_tmp"
+    exit 4
+  fi
+
+  backup_meta_json="$(cat "$resolve_tmp")"
+  rm -f "$resolve_tmp"
+
+  filename="$(json_get_string_field "$backup_meta_json" "filename")"
+  selected_db="$(json_get_string_field "$backup_meta_json" "database")"
+  selected_size_bytes="$(json_get_number_field "$backup_meta_json" "size")"
+
+  if [[ -z "$filename" ]]; then
+    echo "Error: backup ID '$backup_id' resolved to an empty filename." >&2
+    exit 4
+  fi
+
+  printf '%s\t%s\t%s\n' "$filename" "$selected_db" "$selected_size_bytes"
+}
+
 print_available_server_backup_ids() {
   local json_data="$1"
   printf '%s' "$json_data" \
@@ -729,6 +852,313 @@ command_backups_list() {
   fi
 
   print_backups_table "$json_data" "$filter_db" "$latest_only"
+}
+
+command_backups_download() {
+  local target=""
+  local output_path=""
+  local write_stdout="false"
+  local force_overwrite="false"
+  local expected_size_bytes=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --output)
+        [[ $# -lt 2 ]] && { echo "Error: --output requires a value" >&2; exit 2; }
+        output_path="$2"
+        shift 2
+        ;;
+      --stdout)
+        write_stdout="true"
+        shift
+        ;;
+      --force)
+        force_overwrite="true"
+        shift
+        ;;
+      -v|--verbose)
+        increase_verbosity 1
+        shift
+        ;;
+      -vv)
+        increase_verbosity 2
+        shift
+        ;;
+      -vvv)
+        increase_verbosity 3
+        shift
+        ;;
+      --help|-h)
+        usage_backup_download
+        return 0
+        ;;
+      -*)
+        echo "Error: unknown option for backup download: $1" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -n "$target" ]]; then
+          echo "Error: backup download accepts exactly one target (<id|filename>)." >&2
+          exit 2
+        fi
+        target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$target" ]]; then
+    echo "Error: backup download requires an <id|filename> argument." >&2
+    exit 2
+  fi
+  if [[ "$write_stdout" == "true" && -n "$output_path" ]]; then
+    echo "Error: --stdout and --output cannot be used together." >&2
+    exit 2
+  fi
+
+  local token filename selected_db
+  token="$(get_auth_token)"
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    if [[ "$target" -lt 1 ]]; then
+      echo "Error: <id> must be a positive integer from 'bakker backup list'." >&2
+      exit 2
+    fi
+    IFS=$'\t' read -r filename selected_db expected_size_bytes < <(resolve_server_backup_by_id "$target" "$token")
+    echo "Resolved backup ID $target to '$filename' (database '$selected_db')."
+  else
+    filename="$target"
+  fi
+
+  if [[ "$filename" == */* || "$filename" == *\\* ]]; then
+    echo "Error: invalid remote filename '$filename'." >&2
+    exit 2
+  fi
+  if [[ "$filename" != *.sql.gz ]]; then
+    echo "Error: unsupported backup format '$filename' (expected .sql.gz)." >&2
+    exit 2
+  fi
+
+  if [[ ! "$expected_size_bytes" =~ ^[0-9]+$ || "$expected_size_bytes" -le 0 ]]; then
+    expected_size_bytes=""
+  fi
+  if [[ -z "$expected_size_bytes" && "$VERBOSE_LEVEL" -ge 2 ]]; then
+    local backups_json
+    backups_json="$(api_request GET "/api/backups" "$token")"
+    expected_size_bytes="$(resolve_backup_size_by_filename "$backups_json" "$filename" || true)"
+    if [[ ! "$expected_size_bytes" =~ ^[0-9]+$ || "$expected_size_bytes" -le 0 ]]; then
+      expected_size_bytes=""
+    fi
+  fi
+
+  local encoded_filename download_url
+  encoded_filename="$(url_encode "$filename")"
+  download_url="$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename"
+  local download_timeout_args=()
+  if [[ "$REQUEST_TIMEOUT" != "0" && "$REQUEST_TIMEOUT" != "0.0" ]]; then
+    download_timeout_args=(--connect-timeout "$REQUEST_TIMEOUT")
+  fi
+
+  if [[ "$write_stdout" != "true" ]]; then
+    if [[ -z "$output_path" ]]; then
+      output_path="./$filename"
+    elif [[ -d "$output_path" ]]; then
+      output_path="${output_path%/}/$filename"
+    fi
+
+    local output_dir
+    output_dir="$(dirname "$output_path")"
+    mkdir -p "$output_dir"
+
+    if [[ -e "$output_path" && "$force_overwrite" != "true" ]]; then
+      echo "Error: output file exists: $output_path (use --force to overwrite)." >&2
+      exit 4
+    fi
+  fi
+
+  local progress_interval monitor_pid download_pid download_status
+  local progress_tmp_dir="" stream_progress_file=""
+  local track_stream_bytes="false"
+  local download_interrupted="false"
+  local download_started_at download_started_ms transfer_ms downloaded_bytes transferred_bytes mibps
+  download_started_at="$(date +%s)"
+  download_started_ms="$(now_millis)"
+  progress_interval="$(download_progress_interval_seconds)"
+
+  if [[ "$VERBOSE_LEVEL" -ge 2 && -n "$expected_size_bytes" ]]; then
+    if dd_supports_progress; then
+      track_stream_bytes="true"
+    else
+      log_verbose 1 "Detailed download percentage disabled: your 'dd' does not support status=progress."
+    fi
+  fi
+  if [[ "$track_stream_bytes" == "true" ]]; then
+    progress_tmp_dir="$(mktemp -d)"
+    stream_progress_file="$progress_tmp_dir/stream-progress.log"
+    : >"$stream_progress_file"
+  fi
+
+  if [[ "$write_stdout" == "true" ]]; then
+    echo "Streaming backup '$filename' to stdout..." >&2
+  else
+    echo "Downloading backup '$filename' to '$output_path'..." >&2
+  fi
+  if [[ "$VERBOSE_LEVEL" -ge 1 ]]; then
+    echo "Download progress updates enabled (every ${progress_interval}s)." >&2
+    log_verbose 1 "Verbose levels: -v heartbeat only, -vv adds stream percentage, -vvv adds live throughput."
+  fi
+
+  trap '
+    download_interrupted="true"
+    echo "Download interrupted; stopping active transfer..." >&2
+    if [[ -n "${monitor_pid:-}" ]]; then
+      kill "$monitor_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${download_pid:-}" ]]; then
+      if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -P "$download_pid" >/dev/null 2>&1 || true
+      fi
+      kill "$download_pid" >/dev/null 2>&1 || true
+    fi
+  ' INT TERM
+
+  if [[ "$write_stdout" == "true" ]]; then
+    (
+      if [[ "$track_stream_bytes" == "true" ]]; then
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$download_url" \
+          | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file")
+      else
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$download_url"
+      fi
+    ) &
+    download_pid=$!
+  else
+    (
+      if [[ "$track_stream_bytes" == "true" ]]; then
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$download_url" \
+          | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
+          > "$output_path"
+      else
+        curl -sS --fail-with-body "${download_timeout_args[@]}" \
+          -H "Authorization: Bearer $token" \
+          "$download_url" \
+          > "$output_path"
+      fi
+    ) &
+    download_pid=$!
+  fi
+
+  monitor_pid=""
+  if [[ "$VERBOSE_LEVEL" -ge 1 && "$progress_interval" -gt 0 ]]; then
+    (
+      previous_transferred_bytes=""
+      stalled_seconds=0
+      while kill -0 "$download_pid" >/dev/null 2>&1; do
+        sleep "$progress_interval"
+        if ! kill -0 "$download_pid" >/dev/null 2>&1; then
+          break
+        fi
+        local_now="$(date +%s)"
+        elapsed_seconds=$((local_now - download_started_at))
+        details=""
+        if [[ "$track_stream_bytes" == "true" && -n "$expected_size_bytes" && "$expected_size_bytes" -gt 0 ]]; then
+          transferred_bytes="$(read_stream_progress_bytes "$stream_progress_file" || true)"
+          if [[ "$transferred_bytes" =~ ^[0-9]+$ ]]; then
+            percent=$((transferred_bytes * 100 / expected_size_bytes))
+            if [[ "$percent" -gt 100 ]]; then
+              percent=100
+            fi
+            transferred_mib=$((transferred_bytes / 1024 / 1024))
+            total_mib=$((expected_size_bytes / 1024 / 1024))
+            details="stream ${percent}% (${transferred_mib}/${total_mib} MiB)"
+            if [[ -n "$previous_transferred_bytes" && "$transferred_bytes" -eq "$previous_transferred_bytes" ]]; then
+              stalled_seconds=$((stalled_seconds + progress_interval))
+            else
+              stalled_seconds=0
+            fi
+            previous_transferred_bytes="$transferred_bytes"
+            if [[ "$VERBOSE_LEVEL" -ge 3 ]]; then
+              elapsed_ms_live="$(elapsed_millis "$download_started_ms")"
+              live_mibps="$(format_mib_per_second "$transferred_bytes" "$elapsed_ms_live")"
+              if [[ "$live_mibps" != "n/a" ]]; then
+                details="$details, ${live_mibps} MiB/s"
+              fi
+            fi
+            if [[ "$stalled_seconds" -ge $((progress_interval * 2)) ]]; then
+              details="$details, no stream movement for ${stalled_seconds}s"
+            fi
+          fi
+        fi
+        if [[ -n "$details" ]]; then
+          echo "Download in progress (${elapsed_seconds}s elapsed, $details)..." >&2
+        else
+          echo "Download in progress (${elapsed_seconds}s elapsed)..." >&2
+        fi
+      done
+    ) &
+    monitor_pid=$!
+  fi
+
+  set +e
+  wait "$download_pid"
+  download_status=$?
+  set -e
+
+  if [[ -n "$monitor_pid" ]]; then
+    kill "$monitor_pid" >/dev/null 2>&1 || true
+    wait "$monitor_pid" >/dev/null 2>&1 || true
+  fi
+  trap - INT TERM
+
+  if [[ "$download_interrupted" == "true" ]]; then
+    if [[ "$write_stdout" != "true" && -n "$output_path" ]]; then
+      rm -f "$output_path"
+    fi
+    if [[ -n "$progress_tmp_dir" && -d "$progress_tmp_dir" ]]; then
+      rm -rf "$progress_tmp_dir"
+    fi
+    echo "Download cancelled." >&2
+    exit 130
+  fi
+
+  if [[ "$download_status" -ne 0 ]]; then
+    if [[ "$write_stdout" != "true" && -n "$output_path" ]]; then
+      rm -f "$output_path"
+    fi
+    if [[ -n "$progress_tmp_dir" && -d "$progress_tmp_dir" ]]; then
+      rm -rf "$progress_tmp_dir"
+    fi
+    echo "Error: download failed." >&2
+    exit "$download_status"
+  fi
+
+  transfer_ms="$(elapsed_millis "$download_started_ms")"
+  downloaded_bytes=""
+  if [[ "$write_stdout" == "true" ]]; then
+    if [[ "$track_stream_bytes" == "true" ]]; then
+      downloaded_bytes="$(read_stream_progress_bytes "$stream_progress_file" || true)"
+    elif [[ -n "$expected_size_bytes" ]]; then
+      downloaded_bytes="$expected_size_bytes"
+    fi
+  elif [[ -f "$output_path" ]]; then
+    downloaded_bytes="$(wc -c < "$output_path" | tr -d '[:space:]')"
+  fi
+  mibps="$(format_mib_per_second "$downloaded_bytes" "$transfer_ms")"
+
+  if [[ -n "$progress_tmp_dir" && -d "$progress_tmp_dir" ]]; then
+    rm -rf "$progress_tmp_dir"
+  fi
+
+  if [[ "$write_stdout" == "true" ]]; then
+    echo "Download completed for '$filename' (${downloaded_bytes:-unknown} bytes in ${transfer_ms}ms, ${mibps} MiB/s)." >&2
+  else
+    echo "Downloaded '$filename' to '$output_path' (${downloaded_bytes:-unknown} bytes in ${transfer_ms}ms, ${mibps} MiB/s)."
+  fi
 }
 
 confirm_if_needed() {
@@ -851,11 +1281,71 @@ json_get_number_field() {
   printf '%s' "$value"
 }
 
+mysql_import_from_stdin() {
+  local dest_password="$1"
+  local dest_host="$2"
+  local dest_port="$3"
+  local dest_user="$4"
+  local dest_db="$5"
+  local track_table_progress="$6"
+  local table_progress_file="$7"
+  local mysql_init_command="SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO';SET SESSION foreign_key_checks=0;SET SESSION unique_checks=0"
+  local -a mysql_args=(
+    --binary-mode
+    --default-character-set=utf8mb4
+    --max-allowed-packet=1G
+    --connect-timeout=10
+    --init-command="$mysql_init_command"
+    -h "$dest_host" -P "$dest_port" -u "$dest_user" "$dest_db"
+  )
+  local -a decompress_cmd=(gunzip -c)
+
+  if command -v pigz >/dev/null 2>&1; then
+    decompress_cmd=(pigz -dc)
+  fi
+
+  if [[ "$track_table_progress" == "true" && -n "$table_progress_file" ]] && command -v awk >/dev/null 2>&1; then
+    "${decompress_cmd[@]}" \
+      | awk -v status_file="$table_progress_file" '
+          function update_table(name) {
+            if (name == "" || name == current_table) {
+              return
+            }
+            current_table = name
+            print current_table > status_file
+            close(status_file)
+          }
+          function update_from_line(prefix, line, table_name) {
+            if (index(line, prefix) != 1) {
+              return 0
+            }
+            table_name = line
+            sub(/^.*`/, "", table_name)
+            sub(/`.*/, "", table_name)
+            update_table(table_name)
+            return 1
+          }
+          {
+            update_from_line("-- Table structure for table `", $0) \
+              || update_from_line("-- Dumping data for table `", $0) \
+              || update_from_line("CREATE TABLE `", $0) \
+              || update_from_line("INSERT INTO `", $0)
+            print
+          }
+        ' \
+      | MYSQL_PWD="$dest_password" mysql "${mysql_args[@]}"
+    return
+  fi
+
+  "${decompress_cmd[@]}" | MYSQL_PWD="$dest_password" mysql "${mysql_args[@]}"
+}
+
 run_import() {
   local profile="$DEFAULT_PROFILE"
   local import_arg=""
   local force_local_file="false"
   local no_confirm="false"
+  local skip_connectivity_check="false"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -898,6 +1388,10 @@ run_import() {
         ;;
       --yes)
         no_confirm="true"
+        shift
+        ;;
+      --skip-connectivity-check)
+        skip_connectivity_check="true"
         shift
         ;;
       -v|--verbose)
@@ -973,52 +1467,8 @@ run_import() {
     fi
     import_mode="id"
     local backup_id="$import_arg"
-    local backup_meta_json backups_json available_ids
-    local resolve_tmp resolve_status request_url
     token="$(get_auth_token)"
-    resolve_tmp="$(mktemp)"
-    request_url="$(normalize_api_url "$BAKKER_API_URL")/api/backups/by-id/$backup_id"
-    resolve_status="$(curl -sS -o "$resolve_tmp" -w '%{http_code}' --max-time "$REQUEST_TIMEOUT" \
-      -H "Authorization: Bearer $token" \
-      "$request_url")" || {
-        rm -f "$resolve_tmp"
-        echo "Error: request failed: GET $request_url" >&2
-        exit 4
-      }
-    if [[ "$resolve_status" -eq 404 ]]; then
-      rm -f "$resolve_tmp"
-      backups_json="$(api_request GET "/api/backups" "$token")"
-      local resolved_backup_row
-      resolved_backup_row="$(resolve_backup_file_by_id "$backups_json" "$backup_id" || true)"
-      if [[ -n "$resolved_backup_row" ]]; then
-        IFS=$'\t' read -r filename selected_db selected_size_bytes <<<"$resolved_backup_row"
-      else
-        echo "Error: no backup found for ID '$backup_id'." >&2
-        echo "Tip: run 'bakker --config $CONFIG_PATH backup list' and choose an ID from the first column." >&2
-        available_ids="$(print_available_server_backup_ids "$backups_json" || true)"
-        if [[ -n "$available_ids" ]]; then
-          echo "Server IDs currently available: $available_ids" >&2
-        else
-          echo "The server response did not contain usable backup IDs." >&2
-        fi
-        exit 4
-      fi
-    elif [[ "$resolve_status" -ge 400 ]]; then
-      echo "Error: API returned HTTP $resolve_status for GET /api/backups/by-id/$backup_id" >&2
-      cat "$resolve_tmp" >&2
-      rm -f "$resolve_tmp"
-      exit 4
-    else
-      backup_meta_json="$(cat "$resolve_tmp")"
-      filename="$(json_get_string_field "$backup_meta_json" "filename")"
-      selected_db="$(json_get_string_field "$backup_meta_json" "database")"
-      selected_size_bytes="$(json_get_number_field "$backup_meta_json" "size")"
-      rm -f "$resolve_tmp"
-    fi
-    if [[ -z "$filename" ]]; then
-      echo "Error: backup ID '$backup_id' resolved to an empty filename." >&2
-      exit 4
-    fi
+    IFS=$'\t' read -r filename selected_db selected_size_bytes < <(resolve_server_backup_by_id "$backup_id" "$token")
     if [[ "$selected_size_bytes" =~ ^[0-9]+$ && "$selected_size_bytes" -gt 0 ]]; then
       source_size_bytes="$selected_size_bytes"
     fi
@@ -1047,17 +1497,22 @@ run_import() {
   local db_password
   db_password="$(get_profile_db_password "$profile")"
 
-  echo "Checking destination connectivity for profile '$profile'..."
-  connectivity_started_ms="$(now_millis)"
-  if ! connectivity_check "$host" "$port" "$user" "$database" "$db_password"; then
+  if [[ "$skip_connectivity_check" == "true" ]]; then
+    log_verbose 1 "Skipping connectivity preflight check for faster startup."
+    connectivity_ms=0
+  else
+    echo "Checking destination connectivity for profile '$profile'..."
+    connectivity_started_ms="$(now_millis)"
+    if ! connectivity_check "$host" "$port" "$user" "$database" "$db_password"; then
+      connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
+      total_ms="$(elapsed_millis "$run_started_ms")"
+      log_verbose 1 "Import performance (pre-failure): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, total ${total_ms}ms"
+      echo "Error: failed to connect to destination DB ($user@$host:$port/$database)." >&2
+      print_connectivity_hint "$host"
+      exit 5
+    fi
     connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
-    total_ms="$(elapsed_millis "$run_started_ms")"
-    log_verbose 1 "Import performance (pre-failure): resolve ${resolve_ms}ms, connectivity ${connectivity_ms}ms, total ${total_ms}ms"
-    echo "Error: failed to connect to destination DB ($user@$host:$port/$database)." >&2
-    print_connectivity_hint "$host"
-    exit 5
   fi
-  connectivity_ms="$(elapsed_millis "$connectivity_started_ms")"
 
   local import_label="$filename"
   if [[ "$import_mode" == "local-file" ]]; then
@@ -1074,60 +1529,6 @@ run_import() {
   log_verbose 2 "Execution client: local mysql"
   echo "Starting import of '$import_label' into '$profile'..."
 
-  local load_sql_from_stream_script=""
-  read -r -d '' load_sql_from_stream_script <<'SCRIPT' || true
-set -eu
-# Some /bin/sh implementations (e.g. dash) do not support pipefail.
-if (set -o pipefail) >/dev/null 2>&1; then
-  set -o pipefail
-fi
-if ! command -v mysql >/dev/null 2>&1; then
-  echo "ERROR: No SQL client found: mysql." >&2
-  exit 1
-fi
-if [ "${TRACK_TABLE_PROGRESS:-0}" = "1" ] && [ -n "${STATUS_FILE:-}" ] && command -v awk >/dev/null 2>&1; then
-  gunzip \
-    | awk -v status_file="$STATUS_FILE" '
-      function update_table(name) {
-        if (name == "" || name == current_table) {
-          return
-        }
-        current_table = name
-        print current_table > status_file
-        close(status_file)
-      }
-      function update_from_line(prefix, line, table_name) {
-        if (index(line, prefix) != 1) {
-          return 0
-        }
-        table_name = line
-        sub(/^.*`/, "", table_name)
-        sub(/`.*/, "", table_name)
-        update_table(table_name)
-        return 1
-      }
-      {
-        update_from_line("-- Table structure for table `", $0) \
-          || update_from_line("-- Dumping data for table `", $0) \
-          || update_from_line("CREATE TABLE `", $0) \
-          || update_from_line("INSERT INTO `", $0)
-        print
-      }
-    ' \
-    | MYSQL_PWD="$DEST_PASSWORD" mysql \
-        --binary-mode \
-        --default-character-set=utf8mb4 \
-        --init-command="SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'" \
-        -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
-else
-  gunzip | MYSQL_PWD="$DEST_PASSWORD" mysql \
-      --binary-mode \
-      --default-character-set=utf8mb4 \
-      --init-command="SET SESSION sql_mode='NO_AUTO_VALUE_ON_ZERO'" \
-      -h "$DEST_HOST" -P "$DEST_PORT" -u "$DEST_USER" "$DEST_DB"
-fi
-SCRIPT
-
   local progress_interval monitor_pid import_pid import_status started_at now elapsed
   local progress_tmp_dir="" stream_progress_file="" table_progress_file=""
   local track_stream_bytes="false" track_table_progress="false"
@@ -1140,24 +1541,37 @@ SCRIPT
     echo "Import progress updates enabled (every ${progress_interval}s)." >&2
   fi
   if [[ "$VERBOSE_LEVEL" -ge 1 ]]; then
-    progress_tmp_dir="$(mktemp -d)"
-    stream_progress_file="$progress_tmp_dir/stream-progress.log"
-    table_progress_file="$progress_tmp_dir/current-table.txt"
-    : >"$stream_progress_file"
-    : >"$table_progress_file"
-    track_table_progress="true"
-    if [[ -n "$source_size_bytes" ]]; then
-      if dd_supports_progress; then
-        track_stream_bytes="true"
-      else
-        log_verbose 1 "Detailed stream percentage disabled: your 'dd' does not support status=progress."
-      fi
+    log_verbose 1 "Verbose levels: -v heartbeat only, -vv adds stream percentage, -vvv adds table tracker."
+    if command -v pigz >/dev/null 2>&1; then
+      log_verbose 1 "Using decompressor: pigz"
+    else
+      log_verbose 1 "Using decompressor: gunzip"
     fi
   fi
-
-  local host_track_flag="0"
-  if [[ "$track_table_progress" == "true" ]]; then
-    host_track_flag="1"
+  if [[ "$VERBOSE_LEVEL" -ge 2 && -n "$source_size_bytes" ]]; then
+    if dd_supports_progress; then
+      track_stream_bytes="true"
+    else
+      log_verbose 1 "Detailed stream percentage disabled: your 'dd' does not support status=progress."
+    fi
+  fi
+  if [[ "$VERBOSE_LEVEL" -ge 3 ]]; then
+    if command -v awk >/dev/null 2>&1; then
+      track_table_progress="true"
+    else
+      log_verbose 1 "Table-level progress disabled: awk is not available."
+    fi
+  fi
+  if [[ "$track_stream_bytes" == "true" || "$track_table_progress" == "true" ]]; then
+    progress_tmp_dir="$(mktemp -d)"
+    if [[ "$track_stream_bytes" == "true" ]]; then
+      stream_progress_file="$progress_tmp_dir/stream-progress.log"
+      : >"$stream_progress_file"
+    fi
+    if [[ "$track_table_progress" == "true" ]]; then
+      table_progress_file="$progress_tmp_dir/current-table.txt"
+      : >"$table_progress_file"
+    fi
   fi
 
   trap '
@@ -1196,26 +1610,12 @@ SCRIPT
           -H "Authorization: Bearer $token" \
           "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
           | tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") \
-          | TRACK_TABLE_PROGRESS="$host_track_flag" \
-              STATUS_FILE="$table_progress_file" \
-              DEST_PASSWORD="$db_password" \
-              DEST_HOST="$host" \
-              DEST_PORT="$port" \
-              DEST_USER="$user" \
-              DEST_DB="$database" \
-              bash -lc "$load_sql_from_stream_script"
+          | mysql_import_from_stdin "$db_password" "$host" "$port" "$user" "$database" "$track_table_progress" "$table_progress_file"
       else
         curl -sS --fail-with-body "${download_timeout_args[@]}" \
           -H "Authorization: Bearer $token" \
           "$(normalize_api_url "$BAKKER_API_URL")/api/backups/$encoded_filename" \
-          | TRACK_TABLE_PROGRESS="$host_track_flag" \
-              STATUS_FILE="$table_progress_file" \
-              DEST_PASSWORD="$db_password" \
-              DEST_HOST="$host" \
-              DEST_PORT="$port" \
-              DEST_USER="$user" \
-              DEST_DB="$database" \
-              bash -lc "$load_sql_from_stream_script"
+          | mysql_import_from_stdin "$db_password" "$host" "$port" "$user" "$database" "$track_table_progress" "$table_progress_file"
       fi
     ) &
     import_pid=$!
@@ -1223,23 +1623,9 @@ SCRIPT
     (
       if [[ "$track_stream_bytes" == "true" ]]; then
         tee >(dd of=/dev/null status=progress 2>"$stream_progress_file") < "$local_file_path" \
-          | TRACK_TABLE_PROGRESS="$host_track_flag" \
-              STATUS_FILE="$table_progress_file" \
-              DEST_PASSWORD="$db_password" \
-              DEST_HOST="$host" \
-              DEST_PORT="$port" \
-              DEST_USER="$user" \
-              DEST_DB="$database" \
-              bash -lc "$load_sql_from_stream_script"
+          | mysql_import_from_stdin "$db_password" "$host" "$port" "$user" "$database" "$track_table_progress" "$table_progress_file"
       else
-        TRACK_TABLE_PROGRESS="$host_track_flag" \
-          STATUS_FILE="$table_progress_file" \
-          DEST_PASSWORD="$db_password" \
-          DEST_HOST="$host" \
-          DEST_PORT="$port" \
-          DEST_USER="$user" \
-          DEST_DB="$database" \
-          bash -lc "$load_sql_from_stream_script" < "$local_file_path"
+        mysql_import_from_stdin "$db_password" "$host" "$port" "$user" "$database" "$track_table_progress" "$table_progress_file" < "$local_file_path"
       fi
     ) &
     import_pid=$!
@@ -1284,7 +1670,7 @@ SCRIPT
               fi
             fi
           fi
-          if [[ -s "$table_progress_file" ]]; then
+          if [[ "$track_table_progress" == "true" && -n "$table_progress_file" && -s "$table_progress_file" ]]; then
             current_table="$(tail -n 1 "$table_progress_file" 2>/dev/null | tr -d '\r\n')"
             if [[ -n "$current_table" ]]; then
               if [[ -n "$details" ]]; then
@@ -1497,6 +1883,10 @@ main() {
         usage_backups
         return 0
       fi
+      if [[ "${1:-}" == "download" && ( "${2:-}" == "--help" || "${2:-}" == "-h" ) ]]; then
+        usage_backup_download
+        return 0
+      fi
       ;;
     import)
       if [[ "${1:-}" == "--help" || "${1:-}" == "-h" || "${1:-}" == "help" ]]; then
@@ -1523,12 +1913,19 @@ main() {
   case "$cmd" in
     backup|backups)
       local sub="${1:-}"
-      if [[ "$sub" != "list" ]]; then
-        echo "Error: expected 'backup list'" >&2
-        exit 2
-      fi
-      shift
-      command_backups_list "$@"
+      shift || true
+      case "$sub" in
+        list)
+          command_backups_list "$@"
+          ;;
+        download)
+          command_backups_download "$@"
+          ;;
+        *)
+          echo "Error: expected 'backup list' or 'backup download'" >&2
+          exit 2
+          ;;
+      esac
       ;;
     import)
       run_import "$@"

@@ -731,42 +731,54 @@ function wrapDownloadStreamWithPerfLogging(
   });
 }
 
+interface ParsedBackupFilename {
+  file: string;
+  database: string;
+  formattedDate: string;
+}
+
+function parseBackupFilename(file: string): ParsedBackupFilename | null {
+  // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
+  // Greedy match handles underscores in config names.
+  const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
+  if (!match) return null;
+  const database = match[1];
+  const dateStr = match[2];
+  const formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)} ${dateStr.slice(9, 11)}:${dateStr.slice(11, 13)}:${dateStr.slice(13, 15)}`;
+  return { file, database, formattedDate };
+}
+
+async function readBackupWithoutId(
+  parsed: ParsedBackupFilename,
+): Promise<Omit<BackupInfo, "id"> | null> {
+  const filePath = join(BACKUP_DIR, parsed.file);
+  try {
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile()) return null;
+    return {
+      filename: parsed.file,
+      size: fileStat.size,
+      sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
+      sizeHuman: formatBytes(fileStat.size),
+      date: parsed.formattedDate,
+      database: parsed.database,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function listBackups(): Promise<Record<string, BackupInfo[]>> {
   const files = await readdir(BACKUP_DIR);
   files.sort();
   const parsedFiles = files
     .filter((file) => file.endsWith(".sql.gz"))
-    .map((file) => {
-      // Parse filename: {config_name}_{YYYYMMDD_HHMMSS}.sql.gz
-      // Greedy match handles underscores in config names
-      const match = file.match(/^(.+)_(\d{8}_\d{6})\.sql\.gz$/);
-      if (!match) return null;
-      const database = match[1];
-      const dateStr = match[2];
-      const formattedDate = `${dateStr.slice(0, 4)}-${dateStr.slice(4, 6)}-${dateStr.slice(6, 8)} ${dateStr.slice(9, 11)}:${dateStr.slice(11, 13)}:${dateStr.slice(13, 15)}`;
-      return { file, database, formattedDate };
-    })
-    .filter((item): item is { file: string; database: string; formattedDate: string } => item !== null);
+    .map((file) => parseBackupFilename(file))
+    .filter((item): item is ParsedBackupFilename => item !== null);
 
   const backupsWithoutIds = (
     await Promise.all(
-      parsedFiles.map(async ({ file, database, formattedDate }) => {
-        const filePath = join(BACKUP_DIR, file);
-        try {
-          const fileStat = await stat(filePath);
-          if (!fileStat.isFile()) return null;
-          return {
-            filename: file,
-            size: fileStat.size,
-            sizeMB: (fileStat.size / 1024 / 1024).toFixed(2),
-            sizeHuman: formatBytes(fileStat.size),
-            date: formattedDate,
-            database,
-          };
-        } catch {
-          return null;
-        }
-      }),
+      parsedFiles.map(async (parsed) => readBackupWithoutId(parsed)),
     )
   ).filter((item): item is Omit<BackupInfo, "id"> => item !== null);
 
@@ -787,6 +799,19 @@ async function findBackupById(backupId: number): Promise<BackupInfo | null> {
   if (!Number.isInteger(backupId) || backupId < 1) {
     return null;
   }
+
+  const idStore = await readBackupIdStore();
+  for (const [filename, id] of Object.entries(idStore.byFilename)) {
+    if (id !== backupId) continue;
+    const parsed = parseBackupFilename(filename);
+    if (!parsed) break;
+    const backup = await readBackupWithoutId(parsed);
+    if (backup) {
+      return { id: backupId, ...backup };
+    }
+    break;
+  }
+
   const grouped = await listBackups();
   for (const backups of Object.values(grouped)) {
     for (const backup of backups) {
